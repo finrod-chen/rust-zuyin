@@ -3,7 +3,8 @@
 以 Rust 打造效能更佳、選字更聰明的下一代注音輸入法。
 
 完整企劃書（緣起、系統架構、分階段規劃、風險評估）見
-[`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md)。
+[`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md)；PIME 通訊協定研究筆記見
+[`docs/PIME_PROTOCOL.md`](docs/PIME_PROTOCOL.md)。
 
 ## 專案結構
 
@@ -13,18 +14,28 @@ core/           Rust library，注音轉換核心引擎，純邏輯、可獨立�
   syllable.rs   音節狀態機
   dictionary.rs 詞庫查詢
   ranking.rs    候選字排序（詞頻 + 使用者選字記憶）
-backend/        Rust binary，橋接 core engine 與外部輸入法框架
-  main.rs       目前以 line-delimited JSON 跑在 stdin/stdout 上；
-                Phase 2 將改為透過 named pipe 與 PIME 溝通
-pime-config/    PIME 設定檔預留目錄（Phase 2）
+backend/        Rust binary，實作 PIME backend 通訊協定，橋接 core engine
+  protocol.rs   stdin/stdout 線路格式與 PIME 訊息（method／KeyEvent／回應欄位）
+  session.rs    每個 TSF client 對應一個 Session：按鍵分類、組字狀態機
+  main.rs       多 client 連線管理（對應官方 Server／Client）
+pime-config/    PIME 設定檔預留目錄（尚未串上 PIMELauncher）
 data/
   dict.txt      範例詞庫，供開發與測試使用
 docs/
-  PROJECT_PLAN.md  完整專案企劃書
+  PROJECT_PLAN.md   完整專案企劃書
+  PIME_PROTOCOL.md  PIME 官方後端通訊協定研究筆記
 ```
 
-目前進度對應企劃書 Phase 1（核心轉換引擎）：鍵盤佈局、音節組合驗證、詞庫
-查詢、基本詞頻排序皆已可獨立建置與測試；Phase 2（PIME 整合）尚未開始。
+目前進度：
+
+- **Phase 1（核心轉換引擎）**：鍵盤佈局、音節組合驗證、詞庫查詢、基本詞頻
+  排序皆已可獨立建置與測試。
+- **Phase 2（PIME 整合）進行中**：`backend/` 已實作與官方 Python 範例後端
+  相同的 stdin/stdout 線路協定（`<client_id>|json` 請求／
+  `PIME_MSG|<client_id>|json` 回應、`init`／`onActivate`／`filterKeyDown`／
+  `onKeyDown`／`onCompositionTerminated` 等 method），並接上 core engine
+  完成組字與選字。尚未實際安裝 PIMELauncher 驗證（需要 Windows 環境）；
+  語言列按鈕、保留鍵等 UI 相關訊息尚未實作。
 
 ## 開發
 
@@ -35,22 +46,26 @@ cargo build --workspace
 # 執行所有單元測試
 cargo test --workspace
 
-# 手動試跑 backend（以範例詞庫，透過 stdin 逐行送入 JSON 按鍵事件）
+# 手動試跑 backend（以範例詞庫，透過 stdin 逐行送入 PIME 協定訊息）
 cargo run -p zuyin-backend -- data/dict.txt
 ```
 
-`zuyin-backend` 的輸入／輸出協定範例：
+`zuyin-backend` 的輸入／輸出協定範例（見 `docs/PIME_PROTOCOL.md` 完整說明）：
 
-```jsonc
-// stdin（每行一則請求）
-{"type":"key","key":"s"}
-{"type":"key","key":"u"}
-{"type":"key","key":"3"}
-{"type":"select","word":"你"}
+```text
+# stdin（每行一則請求，格式為 "<client_id>|<json>"）
+c1|{"method":"init","seqNum":0,"id":"guid-1","isWindows8Above":true,"isMetroApp":false,"isUiLess":false,"isConsole":false}
+c1|{"method":"onActivate","seqNum":1,"isKeyboardOpen":true}
+c1|{"method":"onKeyDown","seqNum":2,"charCode":115,"keyCode":83,"keyStates":[]}
+c1|{"method":"onKeyDown","seqNum":3,"charCode":117,"keyCode":85,"keyStates":[]}
+c1|{"method":"onKeyDown","seqNum":4,"charCode":51,"keyCode":51,"keyStates":[]}
+c1|{"method":"onKeyDown","seqNum":5,"charCode":32,"keyCode":32,"keyStates":[]}
 
-// stdout（對應每則請求的回應）
-{"buffer":"ㄋ","candidates":[]}
-{"buffer":"ㄋㄧ","candidates":[]}
-{"buffer":"ㄋㄧˇ","candidates":["你"]}
-{"buffer":"","candidates":[],"committed":"你"}
+# stdout（格式為 "PIME_MSG|<client_id>|<json>"）
+PIME_MSG|c1|{"success":true,"seqNum":0}
+PIME_MSG|c1|{"success":true,"seqNum":1}
+PIME_MSG|c1|{"success":true,"seqNum":2,"return":true,"compositionString":"ㄋ","candidateList":[],"showCandidates":false}
+PIME_MSG|c1|{"success":true,"seqNum":3,"return":true,"compositionString":"ㄋㄧ","candidateList":[],"showCandidates":false}
+PIME_MSG|c1|{"success":true,"seqNum":4,"return":true,"compositionString":"ㄋㄧˇ","candidateList":["你"],"showCandidates":true}
+PIME_MSG|c1|{"success":true,"seqNum":5,"return":true,"compositionString":"","commitString":"你","candidateList":[],"showCandidates":false}
 ```

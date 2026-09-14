@@ -51,6 +51,12 @@ impl Engine {
         self.syllable.as_zhuyin_string()
     }
 
+    /// 這個按鍵是否屬於目前的注音鍵盤佈局。供呼叫端（例如平台整合層）
+    /// 在不觸發任何狀態改變的情況下，判斷是否該把按鍵交給這個引擎處理。
+    pub fn supports_key(&self, key: char) -> bool {
+        self.layout.lookup(key).is_some()
+    }
+
     /// 處理一個按鍵事件。
     pub fn key_press(&mut self, key: char) -> KeyOutcome {
         let Some(symbol) = self.layout.lookup(key) else {
@@ -200,6 +206,14 @@ mod tests {
     fn non_zhuyin_key_is_not_handled() {
         let mut engine = Engine::new(Dictionary::new());
         assert_eq!(engine.key_press('!'), KeyOutcome::NotHandled);
+    }
+
+    #[test]
+    fn supports_key_does_not_mutate_state() {
+        let engine = Engine::new(Dictionary::new());
+        assert!(engine.supports_key('s'));
+        assert!(!engine.supports_key('!'));
+        assert_eq!(engine.buffer(), "", "純查詢不應改變組字狀態");
     }
 
     #[test]

@@ -12,9 +12,10 @@
 ```
 core/           Rust library，注音轉換核心引擎，純邏輯、可獨立測試
   keyboard.rs   注音鍵盤佈局定義（目前實作大千式）
-  syllable.rs   音節狀態機
-  dictionary.rs 詞庫查詢
+  syllable.rs   單一音節的狀態機
+  dictionary.rs 詞庫查詢；也維護多音節詞的「合法前綴」索引
   ranking.rs    候選字排序（詞頻 + 使用者選字記憶）
+  lib.rs        Engine：多音節組字狀態機，實作貪婪最長匹配（見下）
   tests/        對隨附詞庫檔案（data/chewing-characters.txt）的整合測試
 backend/        Rust binary，實作 PIME backend 通訊協定，橋接 core engine
   protocol.rs   stdin/stdout 線路格式與 PIME 訊息（method／KeyEvent／回應欄位）
@@ -26,7 +27,8 @@ scripts/
 data/
   dict.txt                範例詞庫（手工撰寫，供文件範例與快速測試使用）
   chewing-characters.txt  正式詞庫：轉換自 libchewing-data 的單字讀音與
-                           詞頻，約 2.6 萬字，backend 預設載入這份
+                           多字詞，約 16 萬筆、附真實詞頻，backend 預設
+                           載入這份
 docs/
   PROJECT_PLAN.md          完整專案企劃書
   PIME_PROTOCOL.md         PIME 官方後端通訊協定研究筆記
@@ -36,10 +38,15 @@ docs/
 目前進度：
 
 - **Phase 1（核心轉換引擎）**：鍵盤佈局、音節組合驗證、詞庫查詢、基本詞頻
-  排序皆已可獨立建置與測試；詞庫已改用轉換自 libchewing-data 的正式單字
-  詞庫（`data/chewing-characters.txt`，約 2.6 萬字，附真實詞頻），不再只
-  是十幾筆的範例資料。目前 core engine 一次只組一個音節，還沒有多字詞
-  （片語）的組字與查詢流程，因此詞庫只收單字讀音。
+  排序皆已可獨立建置與測試；詞庫已改用轉換自 libchewing-data 的正式詞庫
+  （`data/chewing-characters.txt`，單字與多字詞共約 16 萬筆，附真實詞
+  頻），不再只是十幾筆的範例資料。
+  **多字詞（片語）組字**：`core::Engine` 支援連續打好幾個音節，採用
+  「貪婪最長匹配」——只要目前累積的音節序列還可能湊成詞庫裡更長的詞，
+  就持續累積、即時顯示最長的可能詞當候選字；一旦再打下一個音節就湊不出
+  任何詞了，就自動把目前累積裡最長的完整詞送出，再從新音節重新開始（見
+  `core/src/lib.rs` 模組文件）。例如連續打「ㄋㄧˇ」「ㄏㄠˇ」會直接候選
+  「你好」，不是分別選兩個單字。
 - **Phase 2（PIME 整合）進行中**：`backend/` 已實作與官方 Python 範例後端
   相同的 stdin/stdout 線路協定（`<client_id>|json` 請求／
   `PIME_MSG|<client_id>|json` 回應、`init`／`onActivate`／`filterKeyDown`／
@@ -94,6 +101,20 @@ PIME_MSG|c1|{"success":true,"seqNum":2,"return":true,"compositionString":"ㄋ","
 PIME_MSG|c1|{"success":true,"seqNum":3,"return":true,"compositionString":"ㄋㄧ","candidateList":[],"showCandidates":false}
 PIME_MSG|c1|{"success":true,"seqNum":4,"return":true,"compositionString":"ㄋㄧˇ","candidateList":["你"],"showCandidates":true}
 PIME_MSG|c1|{"success":true,"seqNum":5,"return":true,"compositionString":"","commitString":"你","candidateList":[],"showCandidates":false}
+```
+
+連續打兩個音節而不確認選字，候選字會是詞庫裡的多字詞；再打下一個音節
+若接不上，引擎會自動把目前累積裡最長的完整詞透過 `commitString` 送出
+（貪婪最長匹配，見上方「多字詞組字」說明），組字區則接著顯示新音節：
+
+```text
+c1|{"method":"onKeyDown","seqNum":6,"charCode":99,"keyCode":67,"keyStates":[]}
+c1|{"method":"onKeyDown","seqNum":7,"charCode":108,"keyCode":76,"keyStates":[]}
+c1|{"method":"onKeyDown","seqNum":8,"charCode":51,"keyCode":51,"keyStates":[]}
+
+PIME_MSG|c1|{"success":true,"seqNum":6,"return":true,"compositionString":"ㄋㄧˇㄏ","candidateList":[],"showCandidates":false}
+PIME_MSG|c1|{"success":true,"seqNum":7,"return":true,"compositionString":"ㄋㄧˇㄏㄠ","candidateList":[],"showCandidates":false}
+PIME_MSG|c1|{"success":true,"seqNum":8,"return":true,"compositionString":"ㄋㄧˇㄏㄠˇ","candidateList":["你好","妳好"],"showCandidates":true}
 ```
 
 點擊語言列「全／半」按鈕（`commandId` 為 2，見 `docs/PIME_PROTOCOL.md`

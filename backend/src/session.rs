@@ -82,6 +82,11 @@ enum KeyAction {
 pub enum KeyDownOutcome {
     /// 音節組字狀態有變化（含候選字清單更新）。
     Composing {
+        /// 這個按鍵若觸發了 core engine 的貪婪最長匹配自動收斂（見
+        /// `zuyin_core` 文件），這裡是依序自動送出、已接在一起的文字；
+        /// 絕大多數情況下是空字串。呼叫端應把它當成跟這次組字狀態同時
+        /// 發生、但先於組字區內容的既定輸出。
+        flushed: String,
         buffer: String,
         candidates: Vec<String>,
         show_candidates: bool,
@@ -431,12 +436,17 @@ impl Session {
     fn apply_engine_outcome(&mut self, outcome: KeyOutcome) -> KeyDownOutcome {
         match outcome {
             KeyOutcome::NotHandled => KeyDownOutcome::PassThrough,
-            KeyOutcome::Composing { buffer, candidates } => {
+            KeyOutcome::Composing {
+                flushed,
+                buffer,
+                candidates,
+            } => {
                 let candidates: Vec<String> =
                     candidates.into_iter().map(|entry| entry.word).collect();
                 self.show_candidates = !candidates.is_empty();
                 self.last_candidates = candidates.clone();
                 KeyDownOutcome::Composing {
+                    flushed: flushed.join(""),
                     buffer,
                     candidates,
                     show_candidates: self.show_candidates,
@@ -519,6 +529,7 @@ mod tests {
         assert_eq!(
             outcome,
             KeyDownOutcome::Composing {
+                flushed: String::new(),
                 buffer: "ㄋ".into(),
                 candidates: vec![],
                 show_candidates: false
@@ -537,6 +548,7 @@ mod tests {
         assert_eq!(
             outcome,
             KeyDownOutcome::Composing {
+                flushed: String::new(),
                 buffer: "ㄋㄧˇ".into(),
                 candidates: vec!["你".into()],
                 show_candidates: true
@@ -576,6 +588,7 @@ mod tests {
         assert_eq!(
             outcome,
             KeyDownOutcome::Composing {
+                flushed: String::new(),
                 buffer: "ㄅ".into(),
                 candidates: vec![],
                 show_candidates: false
@@ -620,6 +633,7 @@ mod tests {
         assert_eq!(
             outcome,
             KeyDownOutcome::Composing {
+                flushed: String::new(),
                 buffer: "ㄧ".into(),
                 candidates: vec![],
                 show_candidates: false

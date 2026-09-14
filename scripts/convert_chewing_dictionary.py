@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""將 libchewing-data 的單字字庫轉成本專案的詞庫格式（zhuyin<TAB>word<TAB>freq）。
+"""將 libchewing-data 的字庫／詞庫轉成本專案的詞庫格式
+（zhuyin<TAB>word<TAB>freq）。
 
-只轉換「單一國字」的讀音資料——本專案 core engine 目前一次只組一個音節
-（見 core/src/syllable.rs），詞庫查詢也是以單一音節的注音字串為鍵，還沒
-有多音節詞語（片語）的組字與查詢流程，所以 tsi.csv 裡的多字詞條目
-（例如「你好」「台灣」）目前打不出來、轉了也用不到，故不轉換。
+單字讀音與多字詞（片語）都會轉換。多字詞的 zhuyin 欄位保留來源檔案本來
+就有的空白分隔（每個音節一個 token，例如「你好」是 "ㄋㄧˇ ㄏㄠˇ"）：
+core::Dictionary 用這個空白位置切出音節邊界，才能在使用者連續打好幾個
+音節時，判斷目前累積的音節序列是不是詞庫裡某個詞的合法前綴（見
+core/src/dictionary.rs 的 `is_valid_prefix`）。單一音節的詞條本來就沒有
+空白，天然相容。
 
 資料來源（LGPL-2.1-or-later，見各檔案開頭的 dc:rights／dc:license 註解）：
     https://github.com/chewing/libchewing-data
@@ -46,16 +49,23 @@ def main():
         print(f"用法: {sys.argv[0]} <word.csv> <tsi.csv>", file=sys.stderr)
         return 1
 
-    word_rows = [r for r in load_csv(sys.argv[1]) if len(r[0]) == 1]
-    tsi_rows = [r for r in load_csv(sys.argv[2]) if len(r[0]) == 1]
+    word_rows = load_csv(sys.argv[1])
+    tsi_rows = load_csv(sys.argv[2])
 
-    # tsi.csv 的單字詞頻比較準確，優先採用；word.csv 只用來補
+    # 單字讀音：tsi.csv 的詞頻比較準確，優先採用；word.csv 只用來補
     # tsi.csv 沒有收錄的極少數讀音（詞頻沿用 word.csv 原本的 0）。
     merged = {}
     for word, freq, zhuyin in word_rows:
-        merged[(word, zhuyin)] = freq
+        if len(word) == 1:
+            merged[(word, zhuyin)] = freq
     for word, freq, zhuyin in tsi_rows:
-        merged[(word, zhuyin)] = freq
+        if len(word) == 1:
+            merged[(word, zhuyin)] = freq
+
+    # 多字詞：只有 tsi.csv 有，直接收錄，詞頻就是語料統計值。
+    for word, freq, zhuyin in tsi_rows:
+        if len(word) > 1:
+            merged[(word, zhuyin)] = freq
 
     by_zhuyin = {}
     for (word, zhuyin), freq in merged.items():
@@ -66,8 +76,8 @@ def main():
     print("# 來源：libchewing-data（LGPL-2.1-or-later）")
     print("# Copyright (c) libchewing Core Team")
     for zhuyin in sorted(by_zhuyin):
-        # 同音字依詞頻由高到低排序；詞頻相同時保留來源檔案的原始相對順序
-        # （word.csv／tsi.csv 本身就是依同音字的預設優先順序排列）。
+        # 同音（詞）依詞頻由高到低排序；詞頻相同時保留來源檔案的原始相對
+        # 順序（word.csv／tsi.csv 本身就是依預設優先順序排列）。
         entries = sorted(by_zhuyin[zhuyin], key=lambda e: -e[1])
         for word, freq in entries:
             print(f"{zhuyin}\t{word}\t{freq}")

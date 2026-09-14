@@ -8,8 +8,8 @@
 
 由 `scripts/convert_chewing_dictionary.py` 轉換自
 [libchewing-data](https://github.com/chewing/libchewing-data) 的
-`dict/chewing/word.csv` 與 `dict/chewing/tsi.csv`（僅取用其中的單字讀音
-與詞頻，未收錄多字詞——原因見該指令碼開頭註解）。
+`dict/chewing/word.csv` 與 `dict/chewing/tsi.csv`，包含單字讀音與多字詞
+（片語），皆附真實詞頻。
 
 - 授權：**LGPL-2.1-or-later**（見來源檔案開頭的 `dc:license` 註解）
 - 著作權：Copyright (c) libchewing Core Team

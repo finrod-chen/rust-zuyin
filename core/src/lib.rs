@@ -3,6 +3,31 @@
 //! 此 crate 為平台無關的純邏輯 library，不依賴任何特定作業系統 GUI 或
 //! 輸入法框架（如 PIME／TSF），方便獨立測試與優化，也方便未來擴充到其他
 //! 平台。詳見 `docs/PROJECT_PLAN.md`。
+//!
+//! ## 多字詞（片語）組字：貪婪最長匹配
+//!
+//! `Engine` 一次可以累積不只一個音節：使用者連續打完一個音節的所有符號
+//! 後接著打下一個音節時（也就是 [`syllable::Syllable::push`] 因為某個
+//! 分類的槽位已經填過而回傳 `Rejected`），引擎不會馬上捨棄前一個音節，
+//! 而是嘗試把它併入目前正在組的「多音節序列」——只要這個序列仍是詞庫裡
+//! 某個詞的合法前綴（[`dictionary::Dictionary::is_valid_prefix`]），就
+//! 繼續累積、暫不送出任何文字，讓候選字清單即時反映目前整串音節能對上
+//! 的詞。
+//!
+//! 一旦再累積下去就湊不出詞庫裡任何詞（新音節加進去後不再是合法前綴），
+//! 引擎就在這個當下「收斂」：在已累積的音節序列裡，從最長的前綴開始往
+//! 短找，只要某個前綴長度剛好是詞庫裡一個完整詞條，就把那個詞（依詞頻
+//! ／使用者記憶排序後的第一名）當作「自動送出」的文字，這就是「貪婪最
+//! 長匹配」——優先送出找得到的最長詞，而不是逐字送出。送出之後，序列
+//! 裡沒被這次匹配用掉的剩餘音節（若有）會重新嘗試比對，可能連續收斂
+//! 好幾次，直到剩下的音節又能繼續當作合法前綴累積、或完全用盡為止；
+//! 因此一次按鍵理論上可能一口氣自動送出不只一個詞（[`KeyOutcome::Composing`]
+//! 的 `flushed` 是 `Vec<String>`），只是实务上很少發生。
+//!
+//! 這整個過程都不會呼叫 [`ranking::Ranker::record_selection`]——自動送出
+//! 的是引擎當下排序第一的猜測，不代表使用者真的比較過候選字、主動選了
+//! 它，所以不該影響之後的個人化排序；只有透過 [`Engine::select_candidate`]
+//! 明確選字才會被記住。
 
 pub mod dictionary;
 pub mod keyboard;
@@ -11,7 +36,7 @@ pub mod syllable;
 
 pub use dictionary::{Dictionary, Entry};
 
-use keyboard::StandardLayout;
+use keyboard::{StandardLayout, ZhuyinSymbol};
 use ranking::Ranker;
 use syllable::{PushResult, Syllable};
 
@@ -21,8 +46,14 @@ pub enum KeyOutcome {
     /// 按鍵不屬於注音鍵盤，呼叫端應自行處理（例如直接輸入該字元、或視為
     /// 一般英數字元送出）。
     NotHandled,
-    /// 按鍵已接受，組字區內容如下；候選字清單依目前音節查詢並排序。
+    /// 按鍵已接受，組字區內容如下；候選字清單依目前累積的音節序列查詢
+    /// 並排序。
     Composing {
+        /// 這個按鍵若觸發了貪婪最長匹配的自動收斂（見本模組文件），這裡
+        /// 依序是被自動送出的文字；絕大多數情況下是空陣列。呼叫端應將
+        /// 這些文字視為緊接在上一次確認輸出之後、且先於這次組字區內容
+        /// 的既定輸出（例如接在一起設成同一個 `commitString`）。
+        flushed: Vec<String>,
         buffer: String,
         candidates: Vec<Entry>,
     },
@@ -31,7 +62,10 @@ pub enum KeyOutcome {
 /// 注音輸入法核心引擎：組合鍵盤佈局、音節狀態機、詞庫與排序模型。
 pub struct Engine {
     layout: StandardLayout,
-    syllable: Syllable,
+    /// 已確認屬於目前多音節序列、但尚未送出的音節（見模組文件）。
+    committed: Vec<Syllable>,
+    /// 正在輸入中的音節。
+    current: Syllable,
     dictionary: Dictionary,
     ranker: Ranker,
 }
@@ -40,15 +74,17 @@ impl Engine {
     pub fn new(dictionary: Dictionary) -> Self {
         Self {
             layout: StandardLayout,
-            syllable: Syllable::new(),
+            committed: Vec::new(),
+            current: Syllable::new(),
             dictionary,
             ranker: Ranker::new(),
         }
     }
 
-    /// 目前組字區的注音字串。
+    /// 目前組字區的注音字串（已確認音節 + 正在輸入的音節，依序串接、
+    /// 不含分隔符號，供畫面顯示用）。
     pub fn buffer(&self) -> String {
-        self.syllable.as_zhuyin_string()
+        self.display_buffer()
     }
 
     /// 這個按鍵是否屬於目前的注音鍵盤佈局。供呼叫端（例如平台整合層）
@@ -63,24 +99,33 @@ impl Engine {
             return KeyOutcome::NotHandled;
         };
 
-        if self.syllable.push(symbol) == PushResult::Rejected {
-            // 同類別符號已填過：視為使用者要開始下一個音節，重打這一鍵。
-            self.syllable.clear();
-            self.syllable.push(symbol);
-        }
+        let flushed = if self.current.push(symbol) == PushResult::Rejected {
+            // 同類別符號已填過：這個音節結束了，使用者要開始下一個音節。
+            self.advance_to_next_syllable(symbol)
+        } else {
+            Vec::new()
+        };
 
-        self.refresh_candidates()
+        self.refresh_candidates(flushed)
     }
 
-    /// 刪除最後輸入的符號。
+    /// 刪除最後輸入的符號。若目前音節已空，會把上一個已確認音節「還原」
+    /// 回輸入中狀態，再刪除它的最後一個符號——使用者的觀感是「一次刪一
+    /// 個符號」，不會因為符號剛好落在音節邊界而整個音節一次消失。
     pub fn backspace(&mut self) -> KeyOutcome {
-        self.syllable.backspace();
-        self.refresh_candidates()
+        if !self.current.is_empty() {
+            self.current.backspace();
+        } else if let Some(mut last) = self.committed.pop() {
+            last.backspace();
+            self.current = last;
+        }
+        self.refresh_candidates(Vec::new())
     }
 
     /// 清空目前組字狀態（例如使用者按 Esc）。
     pub fn clear(&mut self) {
-        self.syllable.clear();
+        self.committed.clear();
+        self.current.clear();
     }
 
     /// 清除所有已累積的使用者選字記憶，候選字排序退回純依詞庫詞頻。
@@ -90,25 +135,121 @@ impl Engine {
 
     /// 使用者確認選字：記錄使用者記憶並清空組字狀態，回傳應送入應用程式的文字。
     pub fn select_candidate(&mut self, word: &str) -> String {
-        let zhuyin = self.syllable.as_zhuyin_string();
-        self.ranker.record_selection(&zhuyin, word);
-        self.syllable.clear();
+        let key = self.full_key();
+        self.ranker.record_selection(&key, word);
+        self.clear();
         word.to_string()
     }
 
-    fn refresh_candidates(&self) -> KeyOutcome {
-        let buffer = self.syllable.as_zhuyin_string();
-        let candidates = if self.syllable.is_ready() {
-            let entries = self.dictionary.lookup(&buffer);
+    /// 音節邊界處理：把剛結束的音節併入 `committed`，必要時觸發貪婪最長
+    /// 匹配收斂（見模組文件），最後把觸發邊界的這個符號放進全新的
+    /// `current`，開始下一個音節。
+    fn advance_to_next_syllable(&mut self, symbol: ZhuyinSymbol) -> Vec<String> {
+        let finished = std::mem::take(&mut self.current);
+        let mut flushed = Vec::new();
+
+        loop {
+            let mut tentative = self.committed.clone();
+            tentative.push(finished.clone());
+            if self.dictionary.is_valid_prefix(&Self::join_key(&tentative)) {
+                // 加入這個音節後仍有機會湊成詞庫裡的詞，繼續累積、暫不送出。
+                self.committed = tentative;
+                break;
+            }
+
+            // 加進去就湊不出任何詞了：在目前已累積的音節裡，從最長的前綴
+            // 開始找，第一個是詞庫完整詞條的前綴就是這次要送出的詞。
+            if let Some((cut_len, word)) = self.longest_complete_match(&self.committed) {
+                flushed.push(word);
+                self.committed.drain(0..cut_len);
+                // 剩下沒被這次匹配用掉的音節，重新嘗試接上 `finished`。
+                continue;
+            }
+
+            if !self.committed.is_empty() {
+                // 已累積的音節本身、以及它的任何前綴都不是詞庫裡的完整
+                // 詞條（理論上很罕見）：沒有東西可以送出，只能捨棄，避免
+                // 卡在無限迴圈。
+                self.committed.clear();
+                continue;
+            }
+
+            // `committed` 已經是空的、`finished` 自己也不構成任何詞的合法
+            // 前綴（讀音本身就不在詞庫裡）：沒有詞可以延伸或送出，原封
+            // 不動保留這個音節，讓使用者看到組字區內容、可以自行刪除。
+            self.committed = vec![finished.clone()];
+            break;
+        }
+
+        self.current.push(symbol); // 一定成功：current 剛清空
+        flushed
+    }
+
+    /// 在 `syllables` 裡，從最長的前綴開始找第一個是詞庫完整詞條的前綴，
+    /// 回傳它的音節數與（依詞頻／使用者記憶排序後）第一名候選字。
+    fn longest_complete_match(&self, syllables: &[Syllable]) -> Option<(usize, String)> {
+        for len in (1..=syllables.len()).rev() {
+            let key = Self::join_key(&syllables[..len]);
+            let entries = self.dictionary.lookup(&key);
+            if let Some(best) = self.ranker.rank(&key, entries).first() {
+                return Some((len, best.word.clone()));
+            }
+        }
+        None
+    }
+
+    fn refresh_candidates(&self, flushed: Vec<String>) -> KeyOutcome {
+        let buffer = self.display_buffer();
+        let key = self.full_key();
+        let candidates = if key.is_empty() {
+            Vec::new()
+        } else {
+            let entries = self.dictionary.lookup(&key);
             self.ranker
-                .rank(&buffer, entries)
+                .rank(&key, entries)
                 .into_iter()
                 .cloned()
                 .collect()
-        } else {
-            Vec::new()
         };
-        KeyOutcome::Composing { buffer, candidates }
+        KeyOutcome::Composing {
+            flushed,
+            buffer,
+            candidates,
+        }
+    }
+
+    /// 供畫面顯示用的組字區內容：已確認音節與正在輸入的音節依序串接，
+    /// 不含分隔符號。
+    fn display_buffer(&self) -> String {
+        let mut buffer: String = self
+            .committed
+            .iter()
+            .map(Syllable::as_zhuyin_string)
+            .collect();
+        buffer.push_str(&self.current.as_zhuyin_string());
+        buffer
+    }
+
+    /// 供詞庫查詢用的鍵：已確認音節加上（若已可查詢）正在輸入的音節，
+    /// 以空白分隔（見 [`dictionary`] 模組說明）。
+    fn full_key(&self) -> String {
+        let mut parts: Vec<String> = self
+            .committed
+            .iter()
+            .map(Syllable::as_zhuyin_string)
+            .collect();
+        if self.current.is_ready() {
+            parts.push(self.current.as_zhuyin_string());
+        }
+        parts.join(" ")
+    }
+
+    fn join_key(syllables: &[Syllable]) -> String {
+        syllables
+            .iter()
+            .map(Syllable::as_zhuyin_string)
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -136,7 +277,12 @@ mod tests {
         engine.key_press('u');
         let outcome = engine.key_press('3');
         match outcome {
-            KeyOutcome::Composing { buffer, candidates } => {
+            KeyOutcome::Composing {
+                flushed,
+                buffer,
+                candidates,
+            } => {
+                assert_eq!(flushed, Vec::<String>::new());
                 assert_eq!(buffer, "ㄋㄧˇ");
                 assert_eq!(
                     candidates,
@@ -158,7 +304,12 @@ mod tests {
         engine.key_press('l');
         let outcome = engine.key_press('3');
         match outcome {
-            KeyOutcome::Composing { buffer, candidates } => {
+            KeyOutcome::Composing {
+                flushed,
+                buffer,
+                candidates,
+            } => {
+                assert_eq!(flushed, Vec::<String>::new());
                 assert_eq!(buffer, "ㄏㄠˇ");
                 assert_eq!(
                     candidates,
@@ -183,6 +334,7 @@ mod tests {
         assert_eq!(
             outcome,
             KeyOutcome::Composing {
+                flushed: Vec::new(),
                 buffer: "ㄊㄞˊ".into(),
                 candidates: vec![Entry {
                     word: "台".into(),
@@ -198,6 +350,7 @@ mod tests {
         assert_eq!(
             outcome,
             KeyOutcome::Composing {
+                flushed: Vec::new(),
                 buffer: "ㄨㄢ".into(),
                 candidates: vec![Entry {
                     word: "灣".into(),
@@ -270,6 +423,143 @@ mod tests {
         match outcome {
             KeyOutcome::Composing { candidates, .. } => {
                 assert_eq!(candidates[0].word, "好", "清除記憶後應退回純詞頻排序");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    /// 你好 = ㄋㄧˇ ㄏㄠˇ；打完兩個音節，候選字應該是「你好」這個詞，
+    /// 而不是分別打兩個單字。
+    fn phrase_dictionary() -> Dictionary {
+        Dictionary::parse(
+            "ㄋㄧˇ\t你\t9000\n\
+             ㄏㄠˇ\t好\t9000\n\
+             ㄏㄠˇ\t號\t100\n\
+             ㄋㄧˇ ㄏㄠˇ\t你好\t1227\n\
+             ㄕˋ\t是\t9500\n",
+        )
+    }
+
+    #[test]
+    fn typing_two_syllables_of_a_known_phrase_yields_the_phrase_candidate() {
+        let mut engine = Engine::new(phrase_dictionary());
+
+        // 你 = ㄋㄧˇ : s u 3
+        engine.key_press('s');
+        engine.key_press('u');
+        engine.key_press('3');
+        // 好 = ㄏㄠˇ : c l 3
+        engine.key_press('c');
+        engine.key_press('l');
+        let outcome = engine.key_press('3');
+
+        assert_eq!(
+            outcome,
+            KeyOutcome::Composing {
+                flushed: Vec::new(),
+                buffer: "ㄋㄧˇㄏㄠˇ".into(),
+                candidates: vec![Entry {
+                    word: "你好".into(),
+                    frequency: 1227
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn selecting_the_phrase_records_memory_under_the_full_multi_syllable_key() {
+        let mut engine = Engine::new(phrase_dictionary());
+        engine.key_press('s');
+        engine.key_press('u');
+        engine.key_press('3');
+        engine.key_press('c');
+        engine.key_press('l');
+        engine.key_press('3');
+
+        let committed = engine.select_candidate("你好");
+        assert_eq!(committed, "你好");
+        assert_eq!(engine.buffer(), "", "選字後應完全清空多音節緩衝");
+    }
+
+    #[test]
+    fn typing_a_third_syllable_that_breaks_the_phrase_flushes_it_greedily() {
+        let mut engine = Engine::new(phrase_dictionary());
+
+        // 你好 = ㄋㄧˇ ㄏㄠˇ
+        engine.key_press('s');
+        engine.key_press('u');
+        engine.key_press('3');
+        engine.key_press('c');
+        engine.key_press('l');
+        engine.key_press('3');
+
+        // 是 = ㄕˋ：g(ㄕ) 4(ˋ)。到這裡為止，「你好是」還沒被判定失敗——
+        // 因為還沒有下一個音節能證明「是」接不上，候選字清單就是先前
+        // 測試驗證過的「你好」（見 typing_two_syllables_of_a_known_phrase_...）。
+        engine.key_press('g');
+        engine.key_press('4');
+
+        // 直到再打下一個音節的聲母（d=ㄎ），才會發現「你好」＋「是」
+        // 湊不出詞庫裡任何詞：貪婪最長匹配這時才會在已累積的音節裡，
+        // 自動送出其中最長的完整詞條「你好」，並從「是」開始重新累積
+        // （「是」本身仍是合法前綴，繼續保留在組字區，「ㄎ」則是下一個
+        // 音節剛起頭的聲母）。
+        let outcome = engine.key_press('d');
+        assert_eq!(
+            outcome,
+            KeyOutcome::Composing {
+                flushed: vec!["你好".to_string()],
+                buffer: "ㄕˋㄎ".into(),
+                candidates: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn typing_syllable_not_extending_any_word_flushes_the_previous_one_greedily() {
+        // 沒有以「你」開頭的詞（本測試詞庫只有單字），打完「是」以後、
+        // 再打下一個音節的聲母，應該會自動送出「你」，而不是卡住或誤觸發
+        // 不存在的詞。
+        let dict = Dictionary::parse("ㄋㄧˇ\t你\t9000\nㄕˋ\t是\t9500\n");
+        let mut engine = Engine::new(dict);
+
+        engine.key_press('s');
+        engine.key_press('u');
+        engine.key_press('3');
+
+        // 是 = ㄕˋ : g(ㄕ) 4(ˋ)
+        engine.key_press('g');
+        engine.key_press('4');
+
+        // d = ㄎ，下一個音節的聲母，逼引擎判斷「你」＋「是」湊不出詞。
+        let outcome = engine.key_press('d');
+        assert_eq!(
+            outcome,
+            KeyOutcome::Composing {
+                flushed: vec!["你".to_string()],
+                buffer: "ㄕˋㄎ".into(),
+                candidates: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn backspace_uncommits_the_last_syllable_one_symbol_at_a_time() {
+        let mut engine = Engine::new(phrase_dictionary());
+        engine.key_press('s');
+        engine.key_press('u');
+        engine.key_press('3');
+        engine.key_press('c');
+        engine.key_press('l');
+        engine.key_press('3'); // buffer = "ㄋㄧˇㄏㄠˇ", 累積中的「你好」
+
+        let outcome = engine.backspace();
+        match outcome {
+            KeyOutcome::Composing {
+                buffer, candidates, ..
+            } => {
+                assert_eq!(buffer, "ㄋㄧˇㄏㄠ", "應該只刪掉「好」的聲調，不是整個音節");
+                assert!(candidates.is_empty(), "ㄏㄠ（無聲調）不是任何詞的完整讀音");
             }
             other => panic!("unexpected outcome: {other:?}"),
         }

@@ -285,6 +285,7 @@ fn reply_from_key_down(seq_num: u64, outcome: KeyDownOutcome) -> Reply {
             ..Default::default()
         },
         KeyDownOutcome::Composing {
+            flushed,
             buffer,
             candidates,
             show_candidates,
@@ -292,6 +293,15 @@ fn reply_from_key_down(seq_num: u64, outcome: KeyDownOutcome) -> Reply {
             success: true,
             seq_num,
             r#return: Some(json!(true)),
+            // 貪婪最長匹配自動收斂送出的文字（通常是空字串）跟這次的組字
+            // 區內容可以同時出現在同一則回應裡：commitString 是「已經送出
+            // 的既定文字」，compositionString／candidateList 是「接下來
+            // 還在組的部分」，兩者互不衝突。
+            commit_string: if flushed.is_empty() {
+                None
+            } else {
+                Some(flushed)
+            },
             composition_string: Some(buffer),
             candidate_list: Some(candidates),
             show_candidates: Some(show_candidates),
@@ -443,6 +453,85 @@ mod tests {
         assert_eq!(
             responses[4], r#"PIME_MSG|c2|{"success":true,"seqNum":2,"return":false}"#,
             "c2 未啟用應 pass-through"
+        );
+    }
+
+    #[test]
+    fn typing_a_known_phrase_then_a_syllable_that_breaks_it_flushes_via_commit_string() {
+        // 你好 = ㄋㄧˇ ㄏㄠˇ；是 = ㄕˋ（不接在「你好」後面）。
+        let dict = Dictionary::parse(
+            "ㄋㄧˇ\t你\t9000\nㄏㄠˇ\t好\t9000\nㄋㄧˇ ㄏㄠˇ\t你好\t1227\nㄕˋ\t是\t9500\n",
+        );
+        let responses = run_lines(
+            &dict,
+            &[
+                r#"c1|{"method":"init","seqNum":0,"id":"guid-1"}"#,
+                r#"c1|{"method":"onActivate","seqNum":1,"isKeyboardOpen":true}"#,
+                &format!(
+                    r#"c1|{{"method":"onKeyDown","seqNum":2,{}}}"#,
+                    key_event('s' as u32, 0x53)
+                ),
+                &format!(
+                    r#"c1|{{"method":"onKeyDown","seqNum":3,{}}}"#,
+                    key_event('u' as u32, 0x55)
+                ),
+                &format!(
+                    r#"c1|{{"method":"onKeyDown","seqNum":4,{}}}"#,
+                    key_event('3' as u32, 0x33)
+                ),
+                &format!(
+                    r#"c1|{{"method":"onKeyDown","seqNum":5,{}}}"#,
+                    key_event('c' as u32, 0x43)
+                ),
+                &format!(
+                    r#"c1|{{"method":"onKeyDown","seqNum":6,{}}}"#,
+                    key_event('l' as u32, 0x4C)
+                ),
+                &format!(
+                    r#"c1|{{"method":"onKeyDown","seqNum":7,{}}}"#,
+                    key_event('3' as u32, 0x33)
+                ),
+                &format!(
+                    r#"c1|{{"method":"onKeyDown","seqNum":8,{}}}"#,
+                    key_event('g' as u32, 0x47)
+                ),
+                &format!(
+                    r#"c1|{{"method":"onKeyDown","seqNum":9,{}}}"#,
+                    key_event('4' as u32, 0x34)
+                ),
+                &format!(
+                    r#"c1|{{"method":"onKeyDown","seqNum":10,{}}}"#,
+                    key_event('d' as u32, 0x44)
+                ),
+            ],
+        );
+
+        // 打完「你」「好」兩個音節後，候選字應該是詞庫裡的「你好」。
+        let after_hao = &responses[7];
+        assert!(
+            after_hao.contains(r#""compositionString":"ㄋㄧˇㄏㄠˇ""#),
+            "got: {after_hao}"
+        );
+        assert!(
+            after_hao.contains(r#""candidateList":["你好"]"#),
+            "got: {after_hao}"
+        );
+
+        // 再打「是」的聲母＋聲調，還沒破壞「你好」，尚未送出任何文字。
+        let after_shi = &responses[9];
+        assert!(!after_shi.contains("commitString"), "got: {after_shi}");
+
+        // 打下一個音節的聲母（d），逼引擎發現「你好」＋「是」湊不出詞，
+        // 應該把 commitString 設成自動送出的「你好」，同時繼續顯示「是」
+        // 的組字區內容。
+        let after_break = responses.last().unwrap();
+        assert!(
+            after_break.contains(r#""commitString":"你好""#),
+            "got: {after_break}"
+        );
+        assert!(
+            after_break.contains(r#""compositionString":"ㄕˋㄎ""#),
+            "got: {after_break}"
         );
     }
 }

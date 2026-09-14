@@ -2,9 +2,16 @@
 //!
 //! 詞庫檔案格式：每行 `注音<TAB>詞<TAB>詞頻`，`#` 開頭或空白行會被忽略。
 //! Phase 1 建議直接採用新酷音或 RIME 現成公開詞庫轉換而來（見
-//! `docs/PROJECT_PLAN.md` 五、風險與備註）。
+//! `docs/PROJECT_PLAN.md` 五、風險與備註；實際轉換見
+//! `scripts/convert_chewing_dictionary.py`）。
+//!
+//! 多字詞（片語）的注音欄位以空白分隔每個音節，例如「你好」是
+//! `"ㄋㄧˇ ㄏㄠˇ"`；單一音節的詞條沒有空白，天然相容同一套格式。這個
+//! 空白同時是 [`Dictionary::is_valid_prefix`] 判斷音節邊界的依據——
+//! `core::Engine` 用它來決定「使用者連續打的這幾個音節，是否還有機會
+//! 湊成詞庫裡的某個詞」，藉此在最長匹配失敗時知道該在哪裡收手。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -16,10 +23,12 @@ pub struct Entry {
     pub frequency: u32,
 }
 
-/// 以注音字串為鍵的詞庫。
+/// 以注音字串（單音節或以空白分隔的多音節）為鍵的詞庫。
 #[derive(Debug, Default, Clone)]
 pub struct Dictionary {
     entries: HashMap<String, Vec<Entry>>,
+    /// 詞庫中每個詞條的音節前綴集合（見模組說明）。
+    valid_prefixes: HashSet<String>,
 }
 
 impl Dictionary {
@@ -36,6 +45,7 @@ impl Dictionary {
     /// 從字串解析詞庫，格式同 [`Dictionary::load_file`]。
     pub fn parse(content: &str) -> Self {
         let mut entries: HashMap<String, Vec<Entry>> = HashMap::new();
+        let mut valid_prefixes: HashSet<String> = HashSet::new();
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -50,17 +60,40 @@ impl Dictionary {
             let Ok(frequency) = freq.trim().parse::<u32>() else {
                 continue;
             };
+
+            let mut prefix = String::new();
+            for syllable in zhuyin.split(' ') {
+                if !prefix.is_empty() {
+                    prefix.push(' ');
+                }
+                prefix.push_str(syllable);
+                valid_prefixes.insert(prefix.clone());
+            }
+
             entries.entry(zhuyin.to_string()).or_default().push(Entry {
                 word: word.to_string(),
                 frequency,
             });
         }
-        Self { entries }
+        Self {
+            entries,
+            valid_prefixes,
+        }
     }
 
     /// 依注音字串查詢候選字，找不到時回傳空陣列。
     pub fn lookup(&self, zhuyin: &str) -> &[Entry] {
         self.entries.get(zhuyin).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// 這串以空白分隔的音節序列，是否仍是詞庫裡某個詞條的合法前綴
+    /// （詞條本身也算自己的前綴，所以完整詞條在這裡也會回傳 `true`）。
+    ///
+    /// 用來讓 [`crate::Engine`] 判斷：使用者打完目前這個音節後，是要
+    /// 「繼續累積、嘗試組出更長的詞」，還是「這個音節已經沒辦法接在
+    /// 前面湊成任何詞了，該收手」。
+    pub fn is_valid_prefix(&self, syllables: &str) -> bool {
+        self.valid_prefixes.contains(syllables)
     }
 
     /// 詞庫中的候選字（詞）總數。
@@ -114,5 +147,52 @@ mod tests {
     fn malformed_lines_are_ignored() {
         let dict = Dictionary::parse("ㄋㄧˇ\t你\tnot-a-number\nㄏㄠˇ\t好\n");
         assert!(dict.is_empty());
+    }
+
+    #[test]
+    fn multi_syllable_entry_is_looked_up_by_space_joined_key() {
+        let dict = Dictionary::parse("ㄋㄧˇ ㄏㄠˇ\t你好\t1227\n");
+        assert_eq!(
+            dict.lookup("ㄋㄧˇ ㄏㄠˇ"),
+            &[Entry {
+                word: "你好".into(),
+                frequency: 1227
+            }]
+        );
+    }
+
+    #[test]
+    fn single_syllable_prefix_of_a_phrase_is_valid() {
+        let dict = Dictionary::parse("ㄋㄧˇ ㄏㄠˇ\t你好\t1227\n");
+        assert!(
+            dict.is_valid_prefix("ㄋㄧˇ"),
+            "第一個音節本身就是「你好」的合法前綴"
+        );
+        assert!(
+            dict.is_valid_prefix("ㄋㄧˇ ㄏㄠˇ"),
+            "完整詞條本身也算自己的前綴"
+        );
+    }
+
+    #[test]
+    fn unrelated_syllable_is_not_a_valid_prefix() {
+        let dict = Dictionary::parse("ㄋㄧˇ ㄏㄠˇ\t你好\t1227\n");
+        assert!(
+            !dict.is_valid_prefix("ㄕˋ"),
+            "「是」跟「你好」無關，不該是合法前綴"
+        );
+        assert!(
+            !dict.is_valid_prefix("ㄋㄧˇ ㄕˋ"),
+            "「你」後面接「是」湊不出詞庫裡的任何詞"
+        );
+    }
+
+    #[test]
+    fn a_syllable_that_is_only_a_standalone_character_is_not_a_prefix_of_anything_longer() {
+        // 「是」只有單字詞條，沒有以它開頭的更長詞，所以它是自己的前綴，
+        // 但不該讓後面接任何音節都被誤判成「還有機會湊成詞」。
+        let dict = Dictionary::parse("ㄕˋ\t是\t9000\nㄋㄧˇ ㄏㄠˇ\t你好\t1227\n");
+        assert!(dict.is_valid_prefix("ㄕˋ"));
+        assert!(!dict.is_valid_prefix("ㄕˋ ㄋㄧˇ"));
     }
 }

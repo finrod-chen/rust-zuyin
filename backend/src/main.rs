@@ -9,9 +9,14 @@
 mod protocol;
 mod session;
 
-use protocol::{ButtonState, MenuItem, ParsedRequest, PreservedKeyState, Reply, Request};
+use protocol::{
+    ButtonState, CustomizeUi, MenuItem, ParsedRequest, PreservedKeyState, Reply, Request,
+    ShowMessage,
+};
 use serde_json::json;
-use session::{ButtonKind, ButtonSnapshot, KeyDownOutcome, MenuEntry, Session};
+use session::{
+    ButtonKind, ButtonSnapshot, KeyDownOutcome, MenuEntry, MessageSnapshot, Session, UiUpdate,
+};
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
@@ -105,7 +110,8 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
     match request {
         Request::OnActivate { is_keyboard_open } => {
             session.on_activate(is_keyboard_open);
-            // 每次啟用都重新註冊語言列按鈕與保留鍵，讓 PIMELauncher 顯示目前狀態。
+            // 每次啟用都重新註冊語言列按鈕、保留鍵與候選字視窗外觀，
+            // 讓 PIMELauncher 顯示目前狀態。
             let buttons = session.language_bar_buttons().map(button_state).to_vec();
             let preserved_keys = session::preserved_keys().map(preserved_key_state).to_vec();
             Reply {
@@ -113,6 +119,7 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
                 seq_num,
                 add_button: Some(buttons),
                 add_preserved_key: Some(preserved_keys),
+                customize_ui: Some(customize_ui(session::candidate_ui())),
                 ..Default::default()
             }
         }
@@ -133,14 +140,8 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
             }
         }
         Request::OnKeyboardStatusChanged { opened } => {
-            session.on_keyboard_status_changed(opened);
-            let button = button_state(session.language_bar_buttons()[0]);
-            Reply {
-                success: true,
-                seq_num,
-                change_button: Some(vec![button]),
-                ..Default::default()
-            }
+            let update = session.on_keyboard_status_changed(opened);
+            reply_from_ui_update(seq_num, None, update)
         }
         Request::OnCommand {
             command_id,
@@ -154,15 +155,8 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
                     ..Default::default()
                 };
             }
-            let change_button = session
-                .on_command(command_id)
-                .map(|updated| vec![button_state(updated)]);
-            Reply {
-                success: true,
-                seq_num,
-                change_button,
-                ..Default::default()
-            }
+            let update = session.on_command(command_id);
+            reply_from_ui_update(seq_num, None, update)
         }
         Request::OnMenu { button_id } => {
             let menu = session
@@ -176,14 +170,8 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
             }
         }
         Request::OnPreservedKey { guid } => {
-            let (handled, updated) = session.on_preserved_key(&guid);
-            Reply {
-                success: true,
-                seq_num,
-                r#return: Some(json!(handled)),
-                change_button: updated.map(|b| vec![button_state(b)]),
-                ..Default::default()
-            }
+            let (handled, update) = session.on_preserved_key(&guid);
+            reply_from_ui_update(seq_num, Some(handled), update)
         }
         Request::FilterKeyDown(event) => {
             let consumed = session.filter_key_down(&event);
@@ -207,6 +195,37 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
             seq_num,
             ..Default::default()
         },
+    }
+}
+
+/// 把 [`UiUpdate`]（語言列按鈕變化 + 提示訊息）組成一則回應。
+/// `consumed` 是 `onPreservedKey` 專用的 `return` 布林值；其餘呼叫端
+/// （`onKeyboardStatusChanged`／`onCommand`）沒有 `return` 欄位，傳
+/// `None`。
+fn reply_from_ui_update(seq_num: u64, consumed: Option<bool>, update: UiUpdate) -> Reply {
+    Reply {
+        success: true,
+        seq_num,
+        r#return: consumed.map(|c| json!(c)),
+        change_button: update.button.map(|b| vec![button_state(b)]),
+        show_message: update.message.map(show_message),
+        ..Default::default()
+    }
+}
+
+fn customize_ui(snapshot: session::CandidateUiSnapshot) -> CustomizeUi {
+    CustomizeUi {
+        cand_font_name: snapshot.font_name.to_string(),
+        cand_font_size: snapshot.font_size,
+        cand_per_row: snapshot.candidates_per_row,
+        cand_use_cursor: snapshot.use_cursor,
+    }
+}
+
+fn show_message(snapshot: MessageSnapshot) -> ShowMessage {
+    ShowMessage {
+        message: snapshot.text.to_string(),
+        duration: snapshot.duration_secs,
     }
 }
 

@@ -38,8 +38,10 @@ docs/
   完成組字與選字。語言列有三個按鈕：中／英、全形／半形兩個切換按鈕，以及
   一個「設定」選單按鈕（`onMenu`）；全形模式下，組字區為空時打的非注音
   符號（或按 Shift 直接打英文）會轉成全形字元送出，也可用 Shift+Space
-  保留鍵（`onPreservedKey`）切換。設定選單裡可清除使用者選字記憶。尚未
-  實際安裝 PIMELauncher 驗證（需要 Windows 環境）。
+  保留鍵（`onPreservedKey`）切換。設定選單裡可清除使用者選字記憶，操作後
+  以 `showMessage` 顯示暫時提示。`onActivate` 也會用 `customizeUI` 設定
+  候選字視窗外觀（數字鍵選字、每列 10 個候選字）。尚未實際安裝
+  PIMELauncher 驗證（需要 Windows 環境）。
 
 ## 開發
 
@@ -67,7 +69,7 @@ c1|{"method":"onKeyDown","seqNum":5,"charCode":32,"keyCode":32,"keyStates":[]}
 
 # stdout（格式為 "PIME_MSG|<client_id>|<json>"）
 PIME_MSG|c1|{"success":true,"seqNum":0}
-PIME_MSG|c1|{"success":true,"seqNum":1}
+PIME_MSG|c1|{"success":true,"seqNum":1,"addButton":[...],"addPreservedKey":[...],"customizeUI":{"candFontName":"微軟正黑體","candFontSize":16,"candPerRow":10,"candUseCursor":false}}
 PIME_MSG|c1|{"success":true,"seqNum":2,"return":true,"compositionString":"ㄋ","candidateList":[],"showCandidates":false}
 PIME_MSG|c1|{"success":true,"seqNum":3,"return":true,"compositionString":"ㄋㄧ","candidateList":[],"showCandidates":false}
 PIME_MSG|c1|{"success":true,"seqNum":4,"return":true,"compositionString":"ㄋㄧˇ","candidateList":["你"],"showCandidates":true}
@@ -95,4 +97,13 @@ c1|{"method":"onPreservedKey","seqNum":9,"guid":"{9DBF7B72-A1F5-4E00-9E7A-3B1B7A
 
 PIME_MSG|c1|{"success":true,"seqNum":8,"return":[{"text":"全形／半形輸入 (&F)","id":2,"checked":true},{},{"text":"清除使用者選字記憶 (&C)","id":3}]}
 PIME_MSG|c1|{"success":true,"seqNum":9,"return":true,"changeButton":[{"id":"zuyin-fullwidth","text":"半","tooltip":"切換全形／半形標點與符號","type":"toggle","commandId":2,"toggled":false}]}
+```
+
+從設定選單選「清除使用者選字記憶」（`commandId` 為 3）沒有語言列圖示可
+更新，改用 `showMessage` 顯示結果：
+
+```text
+c1|{"method":"onCommand","seqNum":10,"id":3,"type":0}
+
+PIME_MSG|c1|{"success":true,"seqNum":10,"showMessage":{"message":"已清除使用者選字記憶","duration":2}}
 ```

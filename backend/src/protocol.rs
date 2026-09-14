@@ -233,6 +233,23 @@ pub struct PreservedKeyState {
     pub guid: String,
 }
 
+/// 候選字視窗外觀設定，對應官方 `customizeUI`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomizeUi {
+    pub cand_font_name: String,
+    pub cand_font_size: u32,
+    pub cand_per_row: u32,
+    pub cand_use_cursor: bool,
+}
+
+/// 暫時提示訊息，對應官方 `showMessage`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShowMessage {
+    pub message: String,
+    pub duration: u32,
+}
+
 /// 回應 JSON，對應官方 `TextService.currentReply` 累積出的欄位子集。
 /// 只實作 core engine 目前用得到的欄位（見 `docs/PIME_PROTOCOL.md`
 /// 「本專案 Phase 2 的取捨」）。
@@ -260,6 +277,12 @@ pub struct Reply {
     pub change_button: Option<Vec<ButtonState>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub add_preserved_key: Option<Vec<PreservedKeyState>>,
+    // 官方欄位是 "customizeUI"（UI 兩字母都大寫），rename_all = "camelCase"
+    // 只會把它轉成 "customizeUi"，故需要明確覆寫。
+    #[serde(rename = "customizeUI", skip_serializing_if = "Option::is_none")]
+    pub customize_ui: Option<CustomizeUi>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_message: Option<ShowMessage>,
 }
 
 /// 序列化一則回應為 `"PIME_MSG|<client_id>|<json>\n"`（含結尾換行）。
@@ -420,5 +443,37 @@ mod tests {
         };
         let json = format_response("client-1", &reply);
         assert_eq!(json, "PIME_MSG|client-1|{\"success\":true,\"seqNum\":5}\n");
+    }
+
+    /// `#[serde(rename_all = "camelCase")]` 只會把 `customize_ui` 轉成
+    /// `customizeUi`，但官方欄位是 `customizeUI`（U、I 都大寫的縮寫）；
+    /// 曾經因為忘記加 `#[serde(rename = "customizeUI")]` 而序列化錯誤，
+    /// 這個測試鎖住正確的欄位名稱，避免重蹈覆轍。同時鎖住 `ButtonState`
+    /// 的 `commandId`（也曾經漏掉 `rename_all` 序列化成 `command_id`）。
+    #[test]
+    fn wire_field_names_for_fields_that_are_not_plain_camel_case() {
+        let reply = Reply {
+            success: true,
+            seq_num: 1,
+            customize_ui: Some(CustomizeUi {
+                cand_font_name: "字型".into(),
+                cand_font_size: 16,
+                cand_per_row: 10,
+                cand_use_cursor: false,
+            }),
+            add_button: Some(vec![ButtonState {
+                id: "btn".into(),
+                text: "文字".into(),
+                tooltip: "提示".into(),
+                r#type: "toggle",
+                command_id: Some(1),
+                toggled: Some(true),
+            }]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert!(json.contains(r#""customizeUI":"#), "got: {json}");
+        assert!(!json.contains("customizeUi"), "got: {json}");
+        assert!(json.contains(r#""commandId":1"#), "got: {json}");
     }
 }

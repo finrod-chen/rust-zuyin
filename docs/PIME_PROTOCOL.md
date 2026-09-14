@@ -190,10 +190,45 @@ TF_MOD_LSHIFT   = 0x0100
 按下註冊過的組合鍵時，client 送 `{"method":"onPreservedKey","guid":...}`
 （`guid` 統一轉小寫比對），`return` 是 bool，代表是否已處理。
 
+## `customizeUI`：候選字視窗外觀
+
+`onActivate` 回應可用 `customizeUI(**kwargs)` 設定候選字視窗外觀，同樣
+引用 `chewing_ime.py`：
+
+```python
+self.customizeUI(candFontName='MingLiu',
+                 candFontSize=cfg.fontSize,
+                 candPerRow=cfg.candPerRow,
+                 candUseCursor=not(cfg.leftRightAction and cfg.upDownAction))
+```
+
+四個欄位：`candFontName`（字型名稱）、`candFontSize`（字級）、
+`candPerRow`（每列顯示幾個候選字）、`candUseCursor`（`true` 代表用游標
+／方向鍵選字、`false` 代表用數字鍵 1-9 選字）。
+
+**踩過的坑**：`customizeUI` 這個 JSON 欄位名稱的 `UI` 兩個字母都大寫，是
+不規則縮寫，不是規則的 camelCase——`Rust` 這邊若只套用
+`#[serde(rename_all = "camelCase")]`，`customize_ui` 只會被轉成
+`customizeUi`（小寫 i），PIMELauncher 真正期待的欄位名稱對不上。跟先前
+`commandId`（見上）曾被序列化成 `command_id` 是同一類錯誤：只要欄位名稱
+不是規則的 camelCase 分詞，套用 `rename_all` 後務必手動核對一次實際
+輸出的 JSON，必要時加 `#[serde(rename = "...")]` 覆寫。
+
+## `showMessage` / `hideMessage`：暫時提示訊息
+
+`showMessage(message, duration=3)` 讓 client 顯示一個幾秒後自動消失的
+提示訊息（新的呼叫會取代目前顯示的訊息）；`hideMessage()` 立刻關閉。
+`chewing_ime.py` 主要用在「沒有其他畫面回饋」的操作上，例如 Ctrl+Del
+刪除使用者詞彙成功／失敗的提示：
+
+```python
+self.showMessage("刪除「" + target_phrase + "」成功", 2)
+```
+
 ## 本專案 Phase 2 的取捨
 
 Rust 版 `zuyin-backend` 目前實作組字／選字、語言列（中／英、全形／半形、
-設定選單）、以及 Shift+Space 保留鍵：
+設定選單）、Shift+Space 保留鍵、候選字視窗外觀設定，以及暫時提示訊息：
 
 - 訊息框架（`<client_id>|json` in / `PIME_MSG|<client_id>|json` out）
 - `init` / `onActivate` / `onDeactivate` / `onCompositionTerminated`
@@ -204,7 +239,7 @@ Rust 版 `zuyin-backend` 目前實作組字／選字、語言列（中／英、�
   「一律不處理」行為，因為 core engine 目前不需要放開按鍵事件）
 - 回應欄位用到 `compositionString`、`candidateList`、`showCandidates`、
   `commitString`、`addButton`、`changeButton`、`addPreservedKey`、
-  `success`、`seqNum`、`return`
+  `customizeUI`、`showMessage`、`success`、`seqNum`、`return`
 
 ### 語言列按鈕與全形／半形
 
@@ -213,16 +248,21 @@ Rust 版 `zuyin-backend` 目前實作組字／選字、語言列（中／英、�
 - `zuyin-chinese-english`（`commandId=1`，toggle）：中／英切換，對應官方
   `TextService.keyboardOpen`（關閉時完全不攔截按鍵，所有輸入直接交還
   應用程式）；點擊後、或系統送 `onKeyboardStatusChanged` 通知時，回應帶
-  `changeButton` 更新圖示。
+  `changeButton` 更新圖示，後者還會附一則 `showMessage`（因為語言列圖示
+  可能不在使用者視線範圍內）。
 - `zuyin-fullwidth`（`commandId=2`，toggle）：全形／半形切換。開啟時，
   組字區為空、且不是任何注音鍵盤按鍵（或按住 Shift，使用者要跳過注音
   直接打英文）的可印字元，會被轉換成對應全形字元（Unicode
   `U+FF01`–`U+FF5E`，空白鍵特例轉成 `U+3000`）後直接以 `commitString`
-  送出；也可用 Shift+Space 保留鍵切換，效果相同。
+  送出；也可用 Shift+Space 保留鍵切換（附 `showMessage` 提示切換結果，
+  按鈕點擊則不附加，因為圖示變化本身已是回饋）。
 - `zuyin-settings`（`type: "menu"`，無 `commandId`）：點擊觸發 `onMenu`，
   選單提供「全形／半形輸入」（可勾選、`commandId=2`，與上面的按鈕共用
   同一個處理邏輯）與「清除使用者選字記憶」（`commandId=3`，重置
-  `zuyin-core::Engine::forget_selections`，讓候選字排序退回純詞頻）。
+  `zuyin-core::Engine::forget_selections`，讓候選字排序退回純詞頻，並以
+  `showMessage` 顯示「已清除使用者選字記憶」）。
 
-`customizeUI`、`showMessage` 等其餘 UI 相關訊息目前不需要，留待實際串上
-PIMELauncher、需要對應行為時再實作。
+`onMenu` 之外的其餘 UI 相關訊息（`onMenu`／`onPreservedKey` 已支援；
+`removeButton`／`removePreservedKey`／`setSelKeys`／`openKeyboard`／
+`hideMessage` 目前不需要）留待實際串上 PIMELauncher、需要對應行為時再
+實作。

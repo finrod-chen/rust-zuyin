@@ -20,6 +20,9 @@
 //!   常見的慣例快速鍵）。
 //! - 「設定」是一個 `type: "menu"` 按鈕，點擊會觸發 `onMenu`，選單裡的
 //!   「清除使用者選字記憶」會重置 core engine 的排序記憶。
+//! - 沒有語言列圖示可看的操作（保留鍵、系統送來的中英狀態改變、清除記憶）
+//!   會額外附上一則 [`MessageSnapshot`]，供 `main.rs` 轉成官方的
+//!   `showMessage` 暫時提示訊息，讓使用者能看到剛剛發生了什麼。
 //!
 //! 語言列按鈕的字串 `id`（用於 `changeButton` 定位按鈕、`onMenu` 判斷要
 //! 顯示哪個選單）與點擊一般按鈕時 `onCommand` 收到的整數 `commandId` 是
@@ -142,6 +145,43 @@ pub fn preserved_keys() -> [PreservedKeySnapshot; 1] {
     }]
 }
 
+/// 候選字視窗外觀設定；與個別 session 狀態無關，`onActivate` 時原樣回傳
+/// 即可。`use_cursor: false` 對應「用數字鍵 1-9 選字」，跟本專案唯一
+/// 支援的選字方式一致（見 [`Session::classify`] 的候選字視窗處理）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandidateUiSnapshot {
+    pub font_name: &'static str,
+    pub font_size: u32,
+    pub candidates_per_row: u32,
+    pub use_cursor: bool,
+}
+
+pub fn candidate_ui() -> CandidateUiSnapshot {
+    CandidateUiSnapshot {
+        font_name: "微軟正黑體",
+        font_size: 16,
+        candidates_per_row: 10,
+        use_cursor: false,
+    }
+}
+
+/// 暫時提示訊息，`main.rs` 會轉成 PIME 的 `showMessage`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageSnapshot {
+    pub text: &'static str,
+    pub duration_secs: u32,
+}
+
+/// 處理語言列相關事件（按鈕、選單項目、保留鍵、系統中英狀態通知）後，
+/// 需要回饋給使用者的畫面更新。兩個欄位互相獨立，皆可能為 `None`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiUpdate {
+    /// 外觀改變的按鈕，供 `changeButton` 使用。
+    pub button: Option<ButtonSnapshot>,
+    /// 要顯示的暫時提示訊息，供 `showMessage` 使用。
+    pub message: Option<MessageSnapshot>,
+}
+
 pub struct Session {
     engine: Engine,
     is_activated: bool,
@@ -182,11 +222,24 @@ impl Session {
         self.reset_composition();
     }
 
-    /// 系統輸入法切換熱鍵（或其他 client）改變了中／英開關狀態。
-    pub fn on_keyboard_status_changed(&mut self, opened: bool) {
+    /// 系統輸入法切換熱鍵（或其他 client）改變了中／英開關狀態。這個改變
+    /// 不是使用者點擊本輸入法的按鈕造成的，語言列圖示可能不在使用者視線
+    /// 範圍內，因此額外回傳一則提示訊息。
+    pub fn on_keyboard_status_changed(&mut self, opened: bool) -> UiUpdate {
         self.keyboard_open = opened;
         if !opened {
             self.reset_composition();
+        }
+        UiUpdate {
+            button: self.button_snapshot(CHINESE_ENGLISH_BUTTON_ID),
+            message: Some(MessageSnapshot {
+                text: if opened {
+                    "中文模式"
+                } else {
+                    "英文模式"
+                },
+                duration_secs: 2,
+            }),
         }
     }
 
@@ -228,27 +281,40 @@ impl Session {
     }
 
     /// 使用者點擊了帶 `commandId` 的按鈕，或從 `onMenu` 選單選了一個
-    /// 項目（兩者共用同一組 `command_id`）。回傳受影響按鈕更新後的狀態，
-    /// 供 `changeButton` 使用；未知的 `command_id`、或該指令不影響任何
-    /// 按鈕外觀（例如清除記憶），則回傳 `None`。
-    pub fn on_command(&mut self, command_id: i64) -> Option<ButtonSnapshot> {
+    /// 項目（兩者共用同一組 `command_id`）。切換按鈕本身已有圖示變化當
+    /// 作視覺回饋，不額外顯示提示訊息；沒有圖示可看的動作（例如清除
+    /// 記憶）才透過 `message` 回饋結果。未知的 `command_id` 回傳
+    /// `UiUpdate::default()`（兩個欄位皆為 `None`）。
+    pub fn on_command(&mut self, command_id: i64) -> UiUpdate {
         match command_id {
             COMMAND_CHINESE_ENGLISH => {
                 self.keyboard_open = !self.keyboard_open;
                 if !self.keyboard_open {
                     self.reset_composition();
                 }
-                self.button_snapshot(CHINESE_ENGLISH_BUTTON_ID)
+                UiUpdate {
+                    button: self.button_snapshot(CHINESE_ENGLISH_BUTTON_ID),
+                    message: None,
+                }
             }
             COMMAND_FULLWIDTH => {
                 self.fullwidth = !self.fullwidth;
-                self.button_snapshot(FULLWIDTH_BUTTON_ID)
+                UiUpdate {
+                    button: self.button_snapshot(FULLWIDTH_BUTTON_ID),
+                    message: None,
+                }
             }
             COMMAND_CLEAR_MEMORY => {
                 self.engine.forget_selections();
-                None
+                UiUpdate {
+                    button: None,
+                    message: Some(MessageSnapshot {
+                        text: "已清除使用者選字記憶",
+                        duration_secs: 2,
+                    }),
+                }
             }
-            _ => None,
+            _ => UiUpdate::default(),
         }
     }
 
@@ -272,14 +338,25 @@ impl Session {
     }
 
     /// 使用者按下透過 [`preserved_keys`] 註冊的全域熱鍵組合。回傳
-    /// `true` 代表這個 guid 有對應行為並已處理；同時若有按鈕外觀需要
-    /// 更新，一併回傳供 `changeButton` 使用。
-    pub fn on_preserved_key(&mut self, guid: &str) -> (bool, Option<ButtonSnapshot>) {
+    /// `true` 代表這個 guid 有對應行為並已處理。保留鍵沒有按鈕點擊那樣
+    /// 直接的視覺回饋，所以額外附上提示訊息。
+    pub fn on_preserved_key(&mut self, guid: &str) -> (bool, UiUpdate) {
         if guid != SHIFT_SPACE_PRESERVED_KEY_GUID {
-            return (false, None);
+            return (false, UiUpdate::default());
         }
         self.fullwidth = !self.fullwidth;
-        (true, self.button_snapshot(FULLWIDTH_BUTTON_ID))
+        let update = UiUpdate {
+            button: self.button_snapshot(FULLWIDTH_BUTTON_ID),
+            message: Some(MessageSnapshot {
+                text: if self.fullwidth {
+                    "已切換為全形"
+                } else {
+                    "已切換為半形"
+                },
+                duration_secs: 2,
+            }),
+        };
+        (true, update)
     }
 
     fn button_snapshot(&self, id: &str) -> Option<ButtonSnapshot> {
@@ -555,9 +632,29 @@ mod tests {
         let mut session = activated_session();
         session.on_key_down(&key('s' as u32, 0x53)); // 組字區變成 "ㄋ"
 
-        session.on_keyboard_status_changed(false);
+        let update = session.on_keyboard_status_changed(false);
+        assert_eq!(
+            update.message,
+            Some(MessageSnapshot {
+                text: "英文模式",
+                duration_secs: 2
+            })
+        );
         let outcome = session.on_key_down(&key('u' as u32, 0x55));
         assert_eq!(outcome, KeyDownOutcome::PassThrough);
+    }
+
+    #[test]
+    fn keyboard_status_changed_message_reflects_chinese_mode() {
+        let mut session = activated_session();
+        let update = session.on_keyboard_status_changed(true);
+        assert_eq!(
+            update.message,
+            Some(MessageSnapshot {
+                text: "中文模式",
+                duration_secs: 2
+            })
+        );
     }
 
     fn toggled(snapshot: ButtonSnapshot) -> bool {
@@ -575,8 +672,12 @@ mod tests {
             "預設應為中文模式"
         );
 
-        let updated = session.on_command(COMMAND_CHINESE_ENGLISH).unwrap();
-        assert!(!toggled(updated));
+        let update = session.on_command(COMMAND_CHINESE_ENGLISH);
+        assert!(!toggled(update.button.unwrap()));
+        assert_eq!(
+            update.message, None,
+            "按鈕點擊已有圖示變化，不需要額外提示訊息"
+        );
         assert!(
             !session.filter_key_down(&key('s' as u32, 0x53)),
             "切成英文後注音鍵應直接放行"
@@ -592,13 +693,21 @@ mod tests {
     #[test]
     fn unknown_command_id_is_ignored() {
         let mut session = activated_session();
-        assert_eq!(session.on_command(999), None);
+        assert_eq!(session.on_command(999), UiUpdate::default());
     }
 
     #[test]
-    fn clear_memory_command_does_not_change_any_button() {
+    fn clear_memory_command_shows_message_but_changes_no_button() {
         let mut session = activated_session();
-        assert_eq!(session.on_command(COMMAND_CLEAR_MEMORY), None);
+        let update = session.on_command(COMMAND_CLEAR_MEMORY);
+        assert_eq!(update.button, None);
+        assert_eq!(
+            update.message,
+            Some(MessageSnapshot {
+                text: "已清除使用者選字記憶",
+                duration_secs: 2
+            })
+        );
     }
 
     #[test]
@@ -671,21 +780,47 @@ mod tests {
     #[test]
     fn shift_space_preserved_key_toggles_fullwidth() {
         let mut session = activated_session();
-        let (handled, updated) = session.on_preserved_key(SHIFT_SPACE_PRESERVED_KEY_GUID);
+        let (handled, update) = session.on_preserved_key(SHIFT_SPACE_PRESERVED_KEY_GUID);
         assert!(handled);
-        assert!(toggled(updated.unwrap()), "應切成全形");
+        assert!(toggled(update.button.unwrap()), "應切成全形");
+        assert_eq!(
+            update.message,
+            Some(MessageSnapshot {
+                text: "已切換為全形",
+                duration_secs: 2
+            })
+        );
 
         // '!' 不是任何注音鍵，全形模式下應直接轉換送出。
         let outcome = session.on_key_down(&key('!' as u32, 0x31));
         assert_eq!(outcome, KeyDownOutcome::Committed("！".into()));
+
+        // 再按一次應切回半形，訊息文字也要跟著換。
+        let (handled, update) = session.on_preserved_key(SHIFT_SPACE_PRESERVED_KEY_GUID);
+        assert!(handled);
+        assert!(!toggled(update.button.unwrap()));
+        assert_eq!(
+            update.message,
+            Some(MessageSnapshot {
+                text: "已切換為半形",
+                duration_secs: 2
+            })
+        );
     }
 
     #[test]
     fn unknown_preserved_key_guid_is_not_handled() {
         let mut session = activated_session();
-        let (handled, updated) = session.on_preserved_key("{00000000-0000-0000-0000-000000000000}");
+        let (handled, update) = session.on_preserved_key("{00000000-0000-0000-0000-000000000000}");
         assert!(!handled);
-        assert_eq!(updated, None);
+        assert_eq!(update, UiUpdate::default());
+    }
+
+    #[test]
+    fn candidate_ui_uses_number_key_selection() {
+        // use_cursor 必須是 false：本專案只支援用數字鍵 1-9 選字，
+        // 沒有實作游標／方向鍵選字。
+        assert!(!candidate_ui().use_cursor);
     }
 
     #[test]

@@ -4,7 +4,8 @@
 
 完整企劃書（緣起、系統架構、分階段規劃、風險評估）見
 [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md)；PIME 通訊協定研究筆記見
-[`docs/PIME_PROTOCOL.md`](docs/PIME_PROTOCOL.md)。
+[`docs/PIME_PROTOCOL.md`](docs/PIME_PROTOCOL.md)；詞庫資料的授權見
+[`docs/THIRD_PARTY_NOTICES.md`](docs/THIRD_PARTY_NOTICES.md)。
 
 ## 專案結構
 
@@ -14,22 +15,31 @@ core/           Rust library，注音轉換核心引擎，純邏輯、可獨立�
   syllable.rs   音節狀態機
   dictionary.rs 詞庫查詢
   ranking.rs    候選字排序（詞頻 + 使用者選字記憶）
+  tests/        對隨附詞庫檔案（data/chewing-characters.txt）的整合測試
 backend/        Rust binary，實作 PIME backend 通訊協定，橋接 core engine
   protocol.rs   stdin/stdout 線路格式與 PIME 訊息（method／KeyEvent／回應欄位）
   session.rs    每個 TSF client 對應一個 Session：按鍵分類、組字狀態機
   main.rs       多 client 連線管理（對應官方 Server／Client）
 pime-config/    PIME 設定檔預留目錄（尚未串上 PIMELauncher）
+scripts/
+  convert_chewing_dictionary.py  把 libchewing-data 轉成本專案詞庫格式
 data/
-  dict.txt      範例詞庫，供開發與測試使用
+  dict.txt                範例詞庫（手工撰寫，供文件範例與快速測試使用）
+  chewing-characters.txt  正式詞庫：轉換自 libchewing-data 的單字讀音與
+                           詞頻，約 2.6 萬字，backend 預設載入這份
 docs/
-  PROJECT_PLAN.md   完整專案企劃書
-  PIME_PROTOCOL.md  PIME 官方後端通訊協定研究筆記
+  PROJECT_PLAN.md          完整專案企劃書
+  PIME_PROTOCOL.md         PIME 官方後端通訊協定研究筆記
+  THIRD_PARTY_NOTICES.md   詞庫資料的第三方授權聲明
 ```
 
 目前進度：
 
 - **Phase 1（核心轉換引擎）**：鍵盤佈局、音節組合驗證、詞庫查詢、基本詞頻
-  排序皆已可獨立建置與測試。
+  排序皆已可獨立建置與測試；詞庫已改用轉換自 libchewing-data 的正式單字
+  詞庫（`data/chewing-characters.txt`，約 2.6 萬字，附真實詞頻），不再只
+  是十幾筆的範例資料。目前 core engine 一次只組一個音節，還沒有多字詞
+  （片語）的組字與查詢流程，因此詞庫只收單字讀音。
 - **Phase 2（PIME 整合）進行中**：`backend/` 已實作與官方 Python 範例後端
   相同的 stdin/stdout 線路協定（`<client_id>|json` 請求／
   `PIME_MSG|<client_id>|json` 回應、`init`／`onActivate`／`filterKeyDown`／
@@ -52,8 +62,18 @@ cargo build --workspace
 # 執行所有單元測試
 cargo test --workspace
 
-# 手動試跑 backend（以範例詞庫，透過 stdin 逐行送入 PIME 協定訊息）
+# 手動試跑 backend（預設載入 data/chewing-characters.txt 正式詞庫，
+# 透過 stdin 逐行送入 PIME 協定訊息）
+cargo run -p zuyin-backend
+
+# 想用文件範例裡的小型詞庫（下面範例、單元測試用的就是這份）：
 cargo run -p zuyin-backend -- data/dict.txt
+
+# 重新產生 data/chewing-characters.txt（來源與授權見
+# docs/THIRD_PARTY_NOTICES.md）：
+curl -o /tmp/word.csv https://raw.githubusercontent.com/chewing/libchewing-data/master/dict/chewing/word.csv
+curl -o /tmp/tsi.csv  https://raw.githubusercontent.com/chewing/libchewing-data/master/dict/chewing/tsi.csv
+python3 scripts/convert_chewing_dictionary.py /tmp/word.csv /tmp/tsi.csv > data/chewing-characters.txt
 ```
 
 `zuyin-backend` 的輸入／輸出協定範例（見 `docs/PIME_PROTOCOL.md` 完整說明）：

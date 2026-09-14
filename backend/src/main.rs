@@ -25,7 +25,7 @@ use zuyin_core::Dictionary;
 fn main() -> io::Result<()> {
     let dict_path = env::args()
         .nth(1)
-        .unwrap_or_else(|| "data/dict.txt".to_string());
+        .unwrap_or_else(|| "data/chewing-characters.txt".to_string());
     let dictionary = Dictionary::load_file(&dict_path).unwrap_or_else(|err| {
         eprintln!("警告：無法載入詞庫 {dict_path}（{err}），將以空詞庫啟動");
         Dictionary::new()

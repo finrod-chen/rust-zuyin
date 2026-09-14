@@ -33,9 +33,11 @@ docs/
 - **Phase 2（PIME 整合）進行中**：`backend/` 已實作與官方 Python 範例後端
   相同的 stdin/stdout 線路協定（`<client_id>|json` 請求／
   `PIME_MSG|<client_id>|json` 回應、`init`／`onActivate`／`filterKeyDown`／
-  `onKeyDown`／`onCompositionTerminated` 等 method），並接上 core engine
-  完成組字與選字。尚未實際安裝 PIMELauncher 驗證（需要 Windows 環境）；
-  語言列按鈕、保留鍵等 UI 相關訊息尚未實作。
+  `onKeyDown`／`onCompositionTerminated`／`onKeyboardStatusChanged`／
+  `onCommand` 等 method），並接上 core engine 完成組字與選字。語言列上有
+  中／英、全／半兩個切換按鈕：全形模式下，組字區為空時打的非注音符號
+  （或按 Shift 直接打英文）會轉成全形字元送出。尚未實際安裝 PIMELauncher
+  驗證（需要 Windows 環境）；`onMenu`、保留鍵等其餘 UI 相關訊息尚未實作。
 
 ## 開發
 
@@ -68,4 +70,14 @@ PIME_MSG|c1|{"success":true,"seqNum":2,"return":true,"compositionString":"ㄋ","
 PIME_MSG|c1|{"success":true,"seqNum":3,"return":true,"compositionString":"ㄋㄧ","candidateList":[],"showCandidates":false}
 PIME_MSG|c1|{"success":true,"seqNum":4,"return":true,"compositionString":"ㄋㄧˇ","candidateList":["你"],"showCandidates":true}
 PIME_MSG|c1|{"success":true,"seqNum":5,"return":true,"compositionString":"","commitString":"你","candidateList":[],"showCandidates":false}
+```
+
+點擊語言列「全／半」按鈕、切換到全形後打的符號會直接以全形送出：
+
+```text
+c1|{"method":"onCommand","seqNum":6,"id":"zuyin-fullwidth","type":0}
+c1|{"method":"onKeyDown","seqNum":7,"charCode":33,"keyCode":49,"keyStates":[]}
+
+PIME_MSG|c1|{"success":true,"seqNum":6,"changeButton":[{"id":"zuyin-fullwidth","text":"全","tooltip":"切換全形／半形標點與符號","type":"toggle","toggled":true}]}
+PIME_MSG|c1|{"success":true,"seqNum":7,"return":true,"compositionString":"","commitString":"！","candidateList":[],"showCandidates":false}
 ```

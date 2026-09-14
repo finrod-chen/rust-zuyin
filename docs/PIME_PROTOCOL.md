@@ -117,15 +117,29 @@ session 卡死；失敗時回覆 `{"success": false}` 並繼續處理下一行�
 
 ## 本專案 Phase 2 的取捨
 
-Rust 版 `zuyin-backend` 目前只實作組字／選字必要的部分：
+Rust 版 `zuyin-backend` 目前實作組字／選字，以及中／英、全／半兩個語言列
+開關所需的部分：
 
 - 訊息框架（`<client_id>|json` in / `PIME_MSG|<client_id>|json` out）
 - `init` / `onActivate` / `onDeactivate` / `onCompositionTerminated`
+- `onKeyboardStatusChanged`（系統輸入法切換熱鍵改變中／英狀態時）
+- `onCommand`（使用者點擊語言列按鈕）
 - `filterKeyDown` / `onKeyDown`（`filterKeyUp` / `onKeyUp` 維持官方預設的
   「一律不處理」行為，因為 core engine 目前不需要放開按鍵事件）
-- 回應欄位僅用到 `compositionString`、`candidateList`、`showCandidates`、
-  `commitString`、`success`、`seqNum`、`return`
+- 回應欄位用到 `compositionString`、`candidateList`、`showCandidates`、
+  `commitString`、`addButton`、`changeButton`、`success`、`seqNum`、`return`
 
-語言列按鈕（`onCommand`／`onMenu`）、保留鍵（`onPreservedKey`）、
-`customizeUI`、`showMessage` 等 UI 相關訊息目前不需要，留待實際串上
-PIMELauncher、需要對應 UI 行為時再實作。
+### 語言列按鈕與全形／半形
+
+`onActivate` 回應會用 `addButton` 註冊兩個 toggle 按鈕：
+
+- `zuyin-chinese-english`：中／英切換，對應官方 `TextService.keyboardOpen`
+  （關閉時完全不攔截按鍵，所有輸入直接交還應用程式）；點擊後、或系統送
+  `onKeyboardStatusChanged` 通知時，回應帶 `changeButton` 更新圖示。
+- `zuyin-fullwidth`：全形／半形切換。開啟時，組字區為空、且不是任何注音
+  鍵盤按鍵（或按住 Shift，使用者要跳過注音直接打英文）的可印字元，會被
+  轉換成對應全形字元（Unicode `U+FF01`–`U+FF5E`，空白鍵特例轉成
+  `U+3000`）後直接以 `commitString` 送出。
+
+`onMenu`、`onPreservedKey`、`customizeUI`、`showMessage` 等其餘 UI 相關
+訊息目前不需要，留待實際串上 PIMELauncher、需要對應行為時再實作。

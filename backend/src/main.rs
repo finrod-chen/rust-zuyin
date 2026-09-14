@@ -9,8 +9,8 @@
 mod protocol;
 mod session;
 
-use protocol::{ParsedRequest, Reply, Request};
-use session::{KeyDownOutcome, Session};
+use protocol::{ButtonState, ParsedRequest, Reply, Request};
+use session::{ButtonSnapshot, KeyDownOutcome, Session};
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
@@ -102,11 +102,14 @@ fn dispatch(
 /// 對應官方 `TextService.handleRequest` 的分派表（見 `docs/PIME_PROTOCOL.md`）。
 fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> Reply {
     match request {
-        Request::OnActivate => {
-            session.on_activate();
+        Request::OnActivate { is_keyboard_open } => {
+            session.on_activate(is_keyboard_open);
+            // 每次啟用都重新註冊語言列按鈕，讓 PIMELauncher 顯示目前狀態。
+            let buttons = session.language_bar_buttons().map(button_state).to_vec();
             Reply {
                 success: true,
                 seq_num,
+                add_button: Some(buttons),
                 ..Default::default()
             }
         }
@@ -124,6 +127,39 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
                 success: true,
                 seq_num,
                 ..Default::default()
+            }
+        }
+        Request::OnKeyboardStatusChanged { opened } => {
+            session.on_keyboard_status_changed(opened);
+            let button = button_state(session.language_bar_buttons()[0]);
+            Reply {
+                success: true,
+                seq_num,
+                change_button: Some(vec![button]),
+                ..Default::default()
+            }
+        }
+        Request::OnCommand { id, command_type } => {
+            const COMMAND_LEFT_CLICK: i64 = 0;
+            if command_type != COMMAND_LEFT_CLICK {
+                return Reply {
+                    success: true,
+                    seq_num,
+                    ..Default::default()
+                };
+            }
+            match session.on_command(&id) {
+                Some(updated) => Reply {
+                    success: true,
+                    seq_num,
+                    change_button: Some(vec![button_state(updated)]),
+                    ..Default::default()
+                },
+                None => Reply {
+                    success: true,
+                    seq_num,
+                    ..Default::default()
+                },
             }
         }
         Request::FilterKeyDown(event) => {
@@ -148,6 +184,16 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
             seq_num,
             ..Default::default()
         },
+    }
+}
+
+fn button_state(snapshot: ButtonSnapshot) -> ButtonState {
+    ButtonState {
+        id: snapshot.id.to_string(),
+        text: snapshot.text.to_string(),
+        tooltip: snapshot.tooltip.to_string(),
+        r#type: "toggle",
+        toggled: snapshot.toggled,
     }
 }
 
@@ -189,6 +235,7 @@ fn reply_from_key_down(seq_num: u64, outcome: KeyDownOutcome) -> Reply {
             composition_string: Some(String::new()),
             candidate_list: Some(Vec::new()),
             show_candidates: Some(false),
+            ..Default::default()
         },
     }
 }
@@ -275,7 +322,12 @@ mod tests {
         );
 
         assert_eq!(responses[0], r#"PIME_MSG|c1|{"success":true,"seqNum":0}"#);
-        assert_eq!(responses[1], r#"PIME_MSG|c1|{"success":true,"seqNum":1}"#);
+        // onActivate 註冊語言列按鈕（中／英、全／半），見 addButton。
+        assert!(
+            responses[1].starts_with(r#"PIME_MSG|c1|{"success":true,"seqNum":1,"addButton":"#),
+            "got: {}",
+            responses[1]
+        );
         assert_eq!(
             responses[2],
             r#"PIME_MSG|c1|{"success":true,"seqNum":2,"return":true}"#

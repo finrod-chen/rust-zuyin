@@ -15,8 +15,9 @@ pub fn parse_line(line: &str) -> Option<(&str, &str)> {
     line.split_once('|')
 }
 
-/// Windows `GetKeyboardState()` 對應的鍵盤狀態欄位，用來判斷 Ctrl／Alt
-/// 是否按住（`state[code] & 0x80 != 0` 表示該鍵目前按下）。
+/// Windows `GetKeyboardState()` 對應的鍵盤狀態欄位，用來判斷修飾鍵是否
+/// 按住（`state[code] & 0x80 != 0` 表示該鍵目前按下）。
+const VK_SHIFT: usize = 0x10;
 const VK_CONTROL: usize = 0x11;
 const VK_MENU: usize = 0x12; // Alt
 
@@ -35,11 +36,20 @@ pub struct KeyEventData {
 }
 
 impl KeyEventData {
-    /// 是否正按住 Ctrl 或 Alt（不含 Shift，因為 Shift 只是切換符號／大小
-    /// 寫，charCode 已經反映過 Shift 轉換後的結果）。
+    fn is_key_down(&self, code: usize) -> bool {
+        self.key_states.get(code).is_some_and(|&s| s & 0x80 != 0)
+    }
+
+    /// 是否正按住 Ctrl 或 Alt。
     pub fn has_ctrl_or_alt(&self) -> bool {
-        let held = |code: usize| self.key_states.get(code).is_some_and(|&s| s & 0x80 != 0);
-        held(VK_CONTROL) || held(VK_MENU)
+        self.is_key_down(VK_CONTROL) || self.is_key_down(VK_MENU)
+    }
+
+    /// 是否正按住 Shift。用來判斷使用者是否要「跳過注音、直接輸入英文」
+    /// （例如 Shift+字母），因為 charCode 已經是轉換過大小寫的結果，
+    /// 單看 charCode 無法分辨。
+    pub fn has_shift(&self) -> bool {
+        self.is_key_down(VK_SHIFT)
     }
 
     /// `charCode` 若為可印出的 ASCII 字元則回傳該字元，否則回傳 `None`
@@ -56,7 +66,9 @@ pub enum Request {
     /// 官方請求另帶有 `id`（TSF client GUID），但我們的 session 已經以
     /// envelope 的 `client_id` 唯一識別，不需要重複記錄，故不解析該欄位。
     Init,
-    OnActivate,
+    OnActivate {
+        is_keyboard_open: bool,
+    },
     OnDeactivate,
     FilterKeyDown(KeyEventData),
     OnKeyDown(KeyEventData),
@@ -64,10 +76,19 @@ pub enum Request {
     FilterKeyUp,
     OnKeyUp,
     OnCompositionTerminated,
-    /// 目前尚未實作行為的合法 method（例如 `onCommand`／`onMenu`／
-    /// `onPreservedKey`），或完全未知的 method；一律回 `success: false`，
-    /// 與官方 `TextService.handleRequest` 的 `else: success = False`
-    /// 行為一致。
+    /// 語言列按鈕（或系統輸入法切換熱鍵）觸發的中／英開關狀態改變。
+    OnKeyboardStatusChanged {
+        opened: bool,
+    },
+    /// 使用者點擊語言列按鈕。`id` 為我們用 `addButton` 註冊時給定的按鈕
+    /// 識別碼，PIMELauncher 會原樣送回。
+    OnCommand {
+        id: String,
+        command_type: i64,
+    },
+    /// 目前尚未實作行為的合法 method（例如 `onMenu`／`onPreservedKey`），
+    /// 或完全未知的 method；一律回 `success: false`，與官方
+    /// `TextService.handleRequest` 的 `else: success = False` 行為一致。
     Unsupported,
     /// PIMELauncher 通知 client 已斷線，伺服器端應移除該 session、不回應。
     Close,
@@ -90,13 +111,28 @@ pub fn parse_request(json: &str) -> serde_json::Result<ParsedRequest> {
 
     let request = match method {
         "init" => Request::Init,
-        "onActivate" => Request::OnActivate,
+        "onActivate" => Request::OnActivate {
+            is_keyboard_open: value
+                .get("isKeyboardOpen")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        },
         "onDeactivate" => Request::OnDeactivate,
         "filterKeyDown" => key_event(&value).map_or(Request::Unsupported, Request::FilterKeyDown),
         "onKeyDown" => key_event(&value).map_or(Request::Unsupported, Request::OnKeyDown),
         "filterKeyUp" => Request::FilterKeyUp,
         "onKeyUp" => Request::OnKeyUp,
         "onCompositionTerminated" => Request::OnCompositionTerminated,
+        "onKeyboardStatusChanged" => Request::OnKeyboardStatusChanged {
+            opened: value.get("opened").and_then(Value::as_bool).unwrap_or(true),
+        },
+        "onCommand" => match value.get("id").and_then(Value::as_str) {
+            Some(id) => Request::OnCommand {
+                id: id.to_string(),
+                command_type: value.get("type").and_then(Value::as_i64).unwrap_or(0),
+            },
+            None => Request::Unsupported,
+        },
         "close" => Request::Close,
         _ => Request::Unsupported,
     };
@@ -105,6 +141,17 @@ pub fn parse_request(json: &str) -> serde_json::Result<ParsedRequest> {
 
 fn key_event(value: &Value) -> Option<KeyEventData> {
     serde_json::from_value(value.clone()).ok()
+}
+
+/// 語言列按鈕狀態，對應官方 `addButton`／`changeButton` 累積出的 dict
+/// （`{"id": ..., "toggled": ..., "text": ..., "tooltip": ..., "type": ...}`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ButtonState {
+    pub id: String,
+    pub text: String,
+    pub tooltip: String,
+    pub r#type: &'static str,
+    pub toggled: bool,
 }
 
 /// 回應 JSON，對應官方 `TextService.currentReply` 累積出的欄位子集。
@@ -125,6 +172,10 @@ pub struct Reply {
     pub candidate_list: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_candidates: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub add_button: Option<Vec<ButtonState>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_button: Option<Vec<ButtonState>>,
 }
 
 /// 序列化一則回應為 `"PIME_MSG|<client_id>|<json>\n"`（含結尾換行）。
@@ -185,6 +236,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_on_activate_keyboard_open_flag() {
+        let parsed =
+            parse_request(r#"{"method":"onActivate","seqNum":1,"isKeyboardOpen":false}"#).unwrap();
+        assert!(matches!(
+            parsed.request,
+            Request::OnActivate {
+                is_keyboard_open: false
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_on_keyboard_status_changed() {
+        let parsed =
+            parse_request(r#"{"method":"onKeyboardStatusChanged","seqNum":1,"opened":false}"#)
+                .unwrap();
+        assert!(matches!(
+            parsed.request,
+            Request::OnKeyboardStatusChanged { opened: false }
+        ));
+    }
+
+    #[test]
+    fn parses_on_command() {
+        let parsed =
+            parse_request(r#"{"method":"onCommand","seqNum":1,"id":"fullwidth","type":0}"#)
+                .unwrap();
+        assert!(matches!(
+            parsed.request,
+            Request::OnCommand { id, command_type: 0 } if id == "fullwidth"
+        ));
+    }
+
+    #[test]
+    fn on_command_without_id_is_unsupported() {
+        let parsed = parse_request(r#"{"method":"onCommand","seqNum":1,"type":0}"#).unwrap();
+        assert!(matches!(parsed.request, Request::Unsupported));
+    }
+
+    #[test]
     fn malformed_json_is_a_parse_error() {
         assert!(parse_request("not json").is_err());
     }
@@ -199,6 +290,18 @@ mod tests {
             key_states,
         };
         assert!(event.has_ctrl_or_alt());
+    }
+
+    #[test]
+    fn shift_held_is_detected_from_key_states() {
+        let mut key_states = vec![0u8; 32];
+        key_states[VK_SHIFT] = 0x80;
+        let event = KeyEventData {
+            char_code: 'S' as u32,
+            key_code: 0x53,
+            key_states,
+        };
+        assert!(event.has_shift());
     }
 
     #[test]

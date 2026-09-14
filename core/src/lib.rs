@@ -28,6 +28,19 @@
 //! 的是引擎當下排序第一的猜測，不代表使用者真的比較過候選字、主動選了
 //! 它，所以不該影響之後的個人化排序；只有透過 [`Engine::select_candidate`]
 //! 明確選字才會被記住。
+//!
+//! ## 注音縮寫輸入（仿手機輸入法）
+//!
+//! 除了完整音節組字，引擎也支援「只打每個字的第一個符號」來預測多字詞，
+//! 模仿手機注音輸入法常見的縮寫聯想（見
+//! [`dictionary::Dictionary::lookup_abbreviation`] 的縮寫碼定義）。當
+//! 目前累積的音節（已確認 + 正在輸入中）全部都只打了一個符號、且至少有
+//! 兩個音節時（[`Engine::abbreviation_code`]），引擎會額外把這些符號串
+//! 起來查詢縮寫索引，把結果併入候選字清單（見 [`Engine::refresh_candidates`]）。
+//! 例如連續打兩個 ㄒ（各自只打聲母、不接任何介母／韻母／聲調），候選字
+//! 就會出現「謝謝」「熊熊」「行銷」等兩個音節開頭都是 ㄒ 的詞。這與貪婪
+//! 最長匹配是同一套音節累積機制，只是額外多查一次縮寫索引，不影響一般
+//! 完整音節組字與自動收斂的行為。
 
 pub mod dictionary;
 pub mod keyboard;
@@ -201,7 +214,7 @@ impl Engine {
     fn refresh_candidates(&self, flushed: Vec<String>) -> KeyOutcome {
         let buffer = self.display_buffer();
         let key = self.full_key();
-        let candidates = if key.is_empty() {
+        let mut candidates: Vec<Entry> = if key.is_empty() {
             Vec::new()
         } else {
             let entries = self.dictionary.lookup(&key);
@@ -211,11 +224,52 @@ impl Engine {
                 .cloned()
                 .collect()
         };
+
+        if let Some(code) = self.abbreviation_code() {
+            let entries = self.dictionary.lookup_abbreviation(&code);
+            // 排序仍用 `key`（而非縮寫碼）當記憶鍵，因為 `select_candidate`
+            // 一律以 `full_key()` 記錄使用者選字記憶（見該方法），縮寫來的
+            // 候選字要跟一般候選字共用同一份個人化記憶才有意義。
+            for candidate in self.ranker.rank(&key, entries) {
+                if !candidates
+                    .iter()
+                    .any(|existing| existing.word == candidate.word)
+                {
+                    candidates.push(candidate.clone());
+                }
+            }
+        }
+
         KeyOutcome::Composing {
             flushed,
             buffer,
             candidates,
         }
+    }
+
+    /// 若目前累積的音節（已確認 + 正在輸入中）都只打了「第一個符號」
+    /// （見 [`syllable::Syllable::leading_glyph`]），且至少有兩個音節，
+    /// 回傳依序串起來的縮寫碼，供 [`dictionary::Dictionary::lookup_abbreviation`]
+    /// 查詢；否則回傳 `None`（例如任一音節已經打了不只一個符號，代表
+    /// 使用者是在正常輸入完整音節，不是縮寫輸入）。
+    fn abbreviation_code(&self) -> Option<String> {
+        let mut syllables: Vec<&Syllable> = self.committed.iter().collect();
+        if self.current.is_ready() {
+            syllables.push(&self.current);
+        }
+        if syllables.len() < 2 {
+            return None;
+        }
+
+        let mut code = String::new();
+        for syllable in syllables {
+            let zhuyin = syllable.as_zhuyin_string();
+            if zhuyin.chars().count() != 1 {
+                return None;
+            }
+            code.push_str(&zhuyin);
+        }
+        Some(code)
     }
 
     /// 供畫面顯示用的組字區內容：已確認音節與正在輸入的音節依序串接，
@@ -540,6 +594,81 @@ mod tests {
                 buffer: "ㄕˋㄎ".into(),
                 candidates: Vec::new(),
             }
+        );
+    }
+
+    /// 謝謝／熊熊／行銷三個詞的頭兩個音節開頭都是 ㄒ，用來驗證縮寫輸入
+    /// （見模組文件「注音縮寫輸入」）。
+    fn abbreviation_dictionary() -> Dictionary {
+        Dictionary::parse(
+            "ㄒㄧㄝˋ ㄒㄧㄝˋ\t謝謝\t500\n\
+             ㄒㄩㄥˊ ㄒㄩㄥˊ\t熊熊\t100\n\
+             ㄒㄧㄥˊ ㄒㄧㄠ\t行銷\t800\n\
+             ㄋㄧˇ ㄏㄠˇ\t你好\t1227\n",
+        )
+    }
+
+    #[test]
+    fn typing_two_bare_initials_predicts_words_sharing_those_leading_glyphs() {
+        let mut engine = Engine::new(abbreviation_dictionary());
+
+        // v = ㄒ（聲母）。連打兩次 v：第一個 ㄒ 因為聲母槽位已填而觸發
+        // 音節邊界，第二個 ㄒ 開始新音節；兩個音節都只打了聲母。
+        engine.key_press('v');
+        let outcome = engine.key_press('v');
+
+        let KeyOutcome::Composing {
+            buffer, candidates, ..
+        } = outcome
+        else {
+            panic!("expected Composing outcome");
+        };
+        assert_eq!(buffer, "ㄒㄒ");
+        let mut words: Vec<&str> = candidates.iter().map(|e| e.word.as_str()).collect();
+        words.sort();
+        assert_eq!(words, vec!["熊熊", "行銷", "謝謝"]);
+    }
+
+    #[test]
+    fn abbreviation_candidates_can_be_selected_like_normal_candidates() {
+        let mut engine = Engine::new(abbreviation_dictionary());
+        engine.key_press('v');
+        engine.key_press('v');
+
+        let committed = engine.select_candidate("行銷");
+        assert_eq!(committed, "行銷");
+        assert_eq!(engine.buffer(), "", "選字後應清空組字區");
+    }
+
+    #[test]
+    fn a_single_bare_initial_does_not_trigger_abbreviation_matching() {
+        // 只打了一個音節（還沒有第二個）不該觸發縮寫查詢。
+        let mut engine = Engine::new(abbreviation_dictionary());
+        let outcome = engine.key_press('v');
+        let KeyOutcome::Composing { candidates, .. } = outcome else {
+            panic!("expected Composing outcome");
+        };
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn a_fully_typed_syllable_does_not_trigger_abbreviation_matching() {
+        // 只要有一個音節打了不只一個符號（正常組字，不是縮寫輸入），
+        // 就不該套用縮寫索引。
+        let mut engine = Engine::new(abbreviation_dictionary());
+
+        // 你 = ㄋㄧˇ : s(ㄋ) u(ㄧ) 3(ˇ)
+        engine.key_press('s');
+        engine.key_press('u');
+        engine.key_press('3');
+        // 再打一個只有聲母的 ㄒ。
+        let outcome = engine.key_press('v');
+        let KeyOutcome::Composing { candidates, .. } = outcome else {
+            panic!("expected Composing outcome");
+        };
+        assert!(
+            candidates.is_empty(),
+            "「你」是完整音節，不該讓這組音節被當成縮寫查詢"
         );
     }
 

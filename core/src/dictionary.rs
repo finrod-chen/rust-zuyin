@@ -10,6 +10,18 @@
 //! 空白同時是 [`Dictionary::is_valid_prefix`] 判斷音節邊界的依據——
 //! `core::Engine` 用它來決定「使用者連續打的這幾個音節，是否還有機會
 //! 湊成詞庫裡的某個詞」，藉此在最長匹配失敗時知道該在哪裡收手。
+//!
+//! ## 注音縮寫輸入（仿手機輸入法）
+//!
+//! 每個音節字串本身就依「聲母 → 介母 → 韻母 → 聲調」排序（見
+//! [`crate::syllable::Syllable::as_zhuyin_string`]），所以音節字串的第一
+//! 個字元，天然就是這個音節「第一個打的符號」（聲母；沒聲母則是介母；
+//! 都沒有才是韻母——聲調恆在最後，不會是第一個字元）。把一個詞每個音節
+//! 的第一個字元依序串起來，就是這個詞的「縮寫碼」，例如「謝謝」
+//! （ㄒㄧㄝˋ ㄒㄧㄝˋ）的縮寫碼是「ㄒㄒ」。[`Dictionary::lookup_abbreviation`]
+//! 用這個縮寫碼查詞，讓使用者只打每個字的第一個符號就能叫出候選字，
+//! 只建立在至少兩個音節的詞條上（見 [`Dictionary::parse`]），單音節詞
+//! 不會被收進這個索引，避免縮寫查詢被大量單字候選字淹沒。
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -29,6 +41,9 @@ pub struct Dictionary {
     entries: HashMap<String, Vec<Entry>>,
     /// 詞庫中每個詞條的音節前綴集合（見模組說明）。
     valid_prefixes: HashSet<String>,
+    /// 縮寫碼（每個音節的第一個符號串起來） -> 候選字，只收多音節詞條
+    /// （見模組說明「注音縮寫輸入」）。
+    abbreviation_index: HashMap<String, Vec<Entry>>,
 }
 
 impl Dictionary {
@@ -46,6 +61,7 @@ impl Dictionary {
     pub fn parse(content: &str) -> Self {
         let mut entries: HashMap<String, Vec<Entry>> = HashMap::new();
         let mut valid_prefixes: HashSet<String> = HashSet::new();
+        let mut abbreviation_index: HashMap<String, Vec<Entry>> = HashMap::new();
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -62,22 +78,36 @@ impl Dictionary {
             };
 
             let mut prefix = String::new();
+            let mut syllable_count = 0;
+            let mut abbreviation_code = String::new();
             for syllable in zhuyin.split(' ') {
                 if !prefix.is_empty() {
                     prefix.push(' ');
                 }
                 prefix.push_str(syllable);
                 valid_prefixes.insert(prefix.clone());
+                syllable_count += 1;
+                if let Some(leading) = syllable.chars().next() {
+                    abbreviation_code.push(leading);
+                }
             }
 
-            entries.entry(zhuyin.to_string()).or_default().push(Entry {
+            let entry = Entry {
                 word: word.to_string(),
                 frequency,
-            });
+            };
+            if syllable_count >= 2 {
+                abbreviation_index
+                    .entry(abbreviation_code)
+                    .or_default()
+                    .push(entry.clone());
+            }
+            entries.entry(zhuyin.to_string()).or_default().push(entry);
         }
         Self {
             entries,
             valid_prefixes,
+            abbreviation_index,
         }
     }
 
@@ -94,6 +124,16 @@ impl Dictionary {
     /// 前面湊成任何詞了，該收手」。
     pub fn is_valid_prefix(&self, syllables: &str) -> bool {
         self.valid_prefixes.contains(syllables)
+    }
+
+    /// 依縮寫碼（每個音節的第一個符號串起來，見模組說明「注音縮寫
+    /// 輸入」）查詢候選字，找不到時回傳空陣列。只有多音節詞條才會被
+    /// 縮寫碼收錄，所以單一符號的縮寫碼必定查不到任何結果。
+    pub fn lookup_abbreviation(&self, code: &str) -> &[Entry] {
+        self.abbreviation_index
+            .get(code)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// 詞庫中的候選字（詞）總數。
@@ -194,5 +234,36 @@ mod tests {
         let dict = Dictionary::parse("ㄕˋ\t是\t9000\nㄋㄧˇ ㄏㄠˇ\t你好\t1227\n");
         assert!(dict.is_valid_prefix("ㄕˋ"));
         assert!(!dict.is_valid_prefix("ㄕˋ ㄋㄧˇ"));
+    }
+
+    #[test]
+    fn abbreviation_lookup_finds_all_words_sharing_the_same_leading_glyphs() {
+        // 謝謝／熊熊／行銷 三個詞的兩個音節開頭都是 ㄒ，縮寫碼都是「ㄒㄒ」。
+        let dict = Dictionary::parse(
+            "ㄒㄧㄝˋ ㄒㄧㄝˋ\t謝謝\t500\n\
+             ㄒㄩㄥˊ ㄒㄩㄥˊ\t熊熊\t100\n\
+             ㄒㄧㄥˊ ㄒㄧㄠ\t行銷\t800\n\
+             ㄋㄧˇ ㄏㄠˇ\t你好\t1227\n",
+        );
+        let mut words: Vec<&str> = dict
+            .lookup_abbreviation("ㄒㄒ")
+            .iter()
+            .map(|e| e.word.as_str())
+            .collect();
+        words.sort();
+        assert_eq!(words, vec!["熊熊", "行銷", "謝謝"]);
+    }
+
+    #[test]
+    fn abbreviation_index_ignores_single_syllable_entries() {
+        // 單音節詞條不該被收進縮寫索引，否則隨便打一個聲母就會被灌爆。
+        let dict = Dictionary::parse("ㄒㄧˋ\t係\t100\n");
+        assert!(dict.lookup_abbreviation("ㄒ").is_empty());
+    }
+
+    #[test]
+    fn abbreviation_lookup_with_no_match_returns_empty_slice() {
+        let dict = Dictionary::parse("ㄋㄧˇ ㄏㄠˇ\t你好\t1227\n");
+        assert!(dict.lookup_abbreviation("ㄒㄒ").is_empty());
     }
 }

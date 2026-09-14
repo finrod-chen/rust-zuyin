@@ -83,6 +83,15 @@ impl Syllable {
             .flatten()
             .collect()
     }
+
+    /// 這個音節「第一個打的符號」（依聲母 → 介母 → 韻母的順序，取第一個
+    /// 已填的），也就是 [`Syllable::as_zhuyin_string`] 結果的第一個字元；
+    /// 用於「注音縮寫輸入」——只打每個字的第一個符號就能查詢對應候選字
+    /// （見 [`crate::dictionary::Dictionary::lookup_abbreviation`]）。
+    /// 完全沒填任何符號時回傳 `None`。
+    pub fn leading_glyph(&self) -> Option<char> {
+        self.initial.or(self.medial).or(self.r#final)
+    }
 }
 
 #[cfg(test)]
@@ -151,5 +160,35 @@ mod tests {
         syllable.clear();
         assert!(syllable.is_empty());
         assert_eq!(syllable.as_zhuyin_string(), "");
+    }
+
+    #[test]
+    fn leading_glyph_is_the_initial_when_present() {
+        let mut syllable = Syllable::new();
+        push_keys(&mut syllable, "s"); // ㄋ
+        assert_eq!(syllable.leading_glyph(), Some('ㄋ'));
+    }
+
+    #[test]
+    fn leading_glyph_falls_back_to_medial_or_final_without_an_initial() {
+        let mut syllable = Syllable::new();
+        push_keys(&mut syllable, "j"); // 灣 = ㄨㄢ 的 ㄨ（介母），沒有聲母
+        assert_eq!(syllable.leading_glyph(), Some('ㄨ'));
+    }
+
+    #[test]
+    fn leading_glyph_is_none_for_an_empty_syllable() {
+        let syllable = Syllable::new();
+        assert_eq!(syllable.leading_glyph(), None);
+    }
+
+    #[test]
+    fn leading_glyph_matches_the_first_character_of_the_full_string() {
+        let mut syllable = Syllable::new();
+        push_keys(&mut syllable, "su3");
+        assert_eq!(
+            syllable.leading_glyph(),
+            syllable.as_zhuyin_string().chars().next()
+        );
     }
 }

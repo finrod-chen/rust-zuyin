@@ -47,6 +47,11 @@ docs/
   任何詞了，就自動把目前累積裡最長的完整詞送出，再從新音節重新開始（見
   `core/src/lib.rs` 模組文件）。例如連續打「ㄋㄧˇ」「ㄏㄠˇ」會直接候選
   「你好」，不是分別選兩個單字。
+  **注音縮寫輸入**：仿照手機注音輸入法，只打每個字的第一個符號（聲母，
+  沒聲母則是介母／韻母，不含聲調）也能預測多字詞——例如連續打兩次
+  ㄒ（不接任何介母／韻母／聲調）會候選「謝謝」「熊熊」「行銷」等兩個
+  音節開頭都是 ㄒ 的詞（見 `core/src/lib.rs` 模組文件「注音縮寫輸入」與
+  `core/src/dictionary.rs` 的 `lookup_abbreviation`）。
 - **Phase 2（PIME 整合）進行中**：`backend/` 已實作與官方 Python 範例後端
   相同的 stdin/stdout 線路協定（`<client_id>|json` 請求／
   `PIME_MSG|<client_id>|json` 回應、`init`／`onActivate`／`filterKeyDown`／
@@ -147,4 +152,16 @@ PIME_MSG|c1|{"success":true,"seqNum":9,"return":true,"changeButton":[{"id":"zuyi
 c1|{"method":"onCommand","seqNum":10,"id":3,"type":0}
 
 PIME_MSG|c1|{"success":true,"seqNum":10,"showMessage":{"message":"已清除使用者選字記憶","duration":2}}
+```
+
+只打每個字的第一個符號（不接介母／韻母／聲調）也能觸發縮寫聯想；連打
+兩次 ㄒ（鍵盤上是 `v`）就會列出兩個音節開頭都是 ㄒ 的詞，例如「謝謝」
+「行銷」「熊熊」：
+
+```text
+c1|{"method":"onKeyDown","seqNum":11,"charCode":118,"keyCode":86,"keyStates":[]}
+c1|{"method":"onKeyDown","seqNum":12,"charCode":118,"keyCode":86,"keyStates":[]}
+
+PIME_MSG|c1|{"success":true,"seqNum":11,"return":true,"compositionString":"ㄒ","candidateList":["ㄒ"],"showCandidates":true}
+PIME_MSG|c1|{"success":true,"seqNum":12,"return":true,"compositionString":"ㄒㄒ","candidateList":["謝謝","行銷","熊熊", "..."],"showCandidates":true}
 ```

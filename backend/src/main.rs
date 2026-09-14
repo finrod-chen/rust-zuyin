@@ -20,30 +20,55 @@ use session::{
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
-use zuyin_core::Dictionary;
+use zuyin_core::{Dictionary, UserPhrases};
+
+/// 使用者自訂詞庫的預設路徑（見 `zuyin_core::user_phrases` 模組文件）。
+/// 刻意放在 repo 根目錄、不放進 `data/`：裡面可能是使用者自己的地址、
+/// 姓名、電話等個人資料，不該被打包進版本控制（見 `.gitignore`）。
+const DEFAULT_USER_PHRASES_PATH: &str = "user_phrases.txt";
 
 fn main() -> io::Result<()> {
-    let dict_path = env::args()
-        .nth(1)
+    let mut args = env::args().skip(1);
+    let dict_path = args
+        .next()
         .unwrap_or_else(|| "data/chewing-characters.txt".to_string());
+    let user_phrases_path = args
+        .next()
+        .unwrap_or_else(|| DEFAULT_USER_PHRASES_PATH.to_string());
+
     let dictionary = Dictionary::load_file(&dict_path).unwrap_or_else(|err| {
         eprintln!("警告：無法載入詞庫 {dict_path}（{err}），將以空詞庫啟動");
         Dictionary::new()
     });
+    let user_phrases = UserPhrases::load_file(&user_phrases_path).unwrap_or_else(|err| {
+        eprintln!("警告：無法載入使用者自訂詞 {user_phrases_path}（{err}），將以空自訂詞庫啟動");
+        UserPhrases::new()
+    });
     eprintln!(
-        "zuyin-backend 已啟動，詞庫載入 {} 筆候選字",
-        dictionary.len()
+        "zuyin-backend 已啟動，詞庫載入 {} 筆候選字，使用者自訂詞 {} 筆",
+        dictionary.len(),
+        user_phrases.len()
     );
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    run(BufReader::new(stdin.lock()), &mut stdout, &dictionary)
+    run(
+        BufReader::new(stdin.lock()),
+        &mut stdout,
+        &dictionary,
+        &user_phrases,
+    )
 }
 
 /// 逐行讀取 `"<client_id>|<json>"` 請求、寫出 `"PIME_MSG|<client_id>|<json>"`
 /// 回應。任何一行處理失敗都不能讓迴圈中斷（見 `docs/PIME_PROTOCOL.md`
 /// 錯誤處理原則），因此每一步都盡量把失敗轉成回應而非提前回傳 `Err`。
-fn run(input: impl BufRead, output: &mut impl Write, dictionary: &Dictionary) -> io::Result<()> {
+fn run(
+    input: impl BufRead,
+    output: &mut impl Write,
+    dictionary: &Dictionary,
+    user_phrases: &UserPhrases,
+) -> io::Result<()> {
     let mut sessions: HashMap<String, Session> = HashMap::new();
     for line in input.lines() {
         let line = line?;
@@ -62,7 +87,7 @@ fn run(input: impl BufRead, output: &mut impl Write, dictionary: &Dictionary) ->
                 eprintln!("client disconnected: {client_id}");
             }
             Ok(parsed) => {
-                let reply = dispatch(&mut sessions, client_id, dictionary, parsed);
+                let reply = dispatch(&mut sessions, client_id, dictionary, user_phrases, parsed);
                 output.write_all(protocol::format_response(client_id, &reply).as_bytes())?;
                 output.flush()?;
             }
@@ -82,6 +107,7 @@ fn dispatch(
     sessions: &mut HashMap<String, Session>,
     client_id: &str,
     dictionary: &Dictionary,
+    user_phrases: &UserPhrases,
     parsed: ParsedRequest,
 ) -> Reply {
     let ParsedRequest { seq_num, request } = parsed;
@@ -89,7 +115,9 @@ fn dispatch(
         Some(session) => handle_initialized(session, seq_num, request),
         None => match request {
             Request::Init => {
-                sessions.insert(client_id.to_string(), Session::new(dictionary.clone()));
+                let mut session = Session::new(dictionary.clone());
+                session.set_user_phrases(user_phrases.clone());
+                sessions.insert(client_id.to_string(), session);
                 Reply {
                     success: true,
                     seq_num,
@@ -331,7 +359,13 @@ mod tests {
     fn run_lines(dictionary: &Dictionary, lines: &[&str]) -> Vec<String> {
         let input = lines.join("\n");
         let mut output = Vec::new();
-        run(input.as_bytes(), &mut output, dictionary).unwrap();
+        run(
+            input.as_bytes(),
+            &mut output,
+            dictionary,
+            &UserPhrases::new(),
+        )
+        .unwrap();
         String::from_utf8(output)
             .unwrap()
             .lines()
@@ -532,6 +566,41 @@ mod tests {
         assert!(
             after_break.contains(r#""compositionString":"ㄕˋㄎ""#),
             "got: {after_break}"
+        );
+    }
+
+    #[test]
+    fn user_phrases_are_reachable_through_the_wire_protocol() {
+        // 使用者自訂詞（見 zuyin_core::user_phrases 模組文件）透過
+        // Session::set_user_phrases 掛上後，打對應注音碼應該能在候選字
+        // 清單看到，且排在詞庫候選字最前面。
+        let dict = Dictionary::parse("ㄈ\t分\t1000\n");
+        let mut user_phrases = UserPhrases::new();
+        user_phrases
+            .add("ㄈ", "台北市大安區羅斯福路四段1號")
+            .unwrap();
+
+        let input = [
+            r#"c1|{"method":"init","seqNum":0,"id":"guid-1"}"#.to_string(),
+            r#"c1|{"method":"onActivate","seqNum":1,"isKeyboardOpen":true}"#.to_string(),
+            format!(
+                r#"c1|{{"method":"onKeyDown","seqNum":2,{}}}"#,
+                key_event('z' as u32, 0x5A)
+            ),
+        ]
+        .join("\n");
+        let mut output = Vec::new();
+        run(input.as_bytes(), &mut output, &dict, &user_phrases).unwrap();
+        let responses: Vec<String> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+
+        let after_key = responses.last().unwrap();
+        assert!(
+            after_key.contains(r#""candidateList":["台北市大安區羅斯福路四段1號","分"]"#),
+            "使用者自訂詞應排在詞庫候選字最前面: {after_key}"
         );
     }
 }

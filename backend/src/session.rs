@@ -29,7 +29,7 @@
 //! 兩個獨立的識別空間，詳見 `docs/PIME_PROTOCOL.md`。
 
 use crate::protocol::KeyEventData;
-use zuyin_core::{Dictionary, Engine, KeyOutcome};
+use zuyin_core::{Dictionary, Engine, KeyOutcome, UserPhrases};
 
 const VK_BACK: u32 = 0x08;
 const VK_ESCAPE: u32 = 0x1B;
@@ -211,6 +211,13 @@ impl Session {
             show_candidates: false,
             last_candidates: Vec::new(),
         }
+    }
+
+    /// 掛上使用者自訂詞庫（見 `zuyin_core` 的 `user_phrases` 模組文件），
+    /// 讓打自訂注音碼時能優先叫出使用者自己設定的地址／姓名／電話等
+    /// 捷徑文字。
+    pub fn set_user_phrases(&mut self, user_phrases: UserPhrases) {
+        self.engine.set_user_phrases(user_phrases);
     }
 
     pub fn on_activate(&mut self, is_keyboard_open: bool) {

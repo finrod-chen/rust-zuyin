@@ -92,6 +92,23 @@ impl Syllable {
     pub fn leading_glyph(&self) -> Option<char> {
         self.initial.or(self.medial).or(self.r#final)
     }
+
+    /// 是否已經輸入聲調符號。
+    pub fn has_tone(&self) -> bool {
+        self.tone.is_some()
+    }
+
+    /// 只由聲母／介母／韻母組成的注音字串（不含聲調），也就是
+    /// [`Syllable::as_zhuyin_string`] 拿掉聲調的版本；用於「不分聲調
+    /// 選字」——使用者只打完拼讀符號、還沒（或不想）指定聲調，也能查到
+    /// 這個音節所有聲調的候選字（見
+    /// [`crate::dictionary::Dictionary::lookup_toneless`]）。
+    pub fn base_zhuyin_string(&self) -> String {
+        [self.initial, self.medial, self.r#final]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -190,5 +207,23 @@ mod tests {
             syllable.leading_glyph(),
             syllable.as_zhuyin_string().chars().next()
         );
+    }
+
+    #[test]
+    fn base_zhuyin_string_drops_the_tone() {
+        let mut syllable = Syllable::new();
+        push_keys(&mut syllable, "su3");
+        assert_eq!(syllable.as_zhuyin_string(), "ㄋㄧˇ");
+        assert_eq!(syllable.base_zhuyin_string(), "ㄋㄧ");
+        assert!(syllable.has_tone());
+    }
+
+    #[test]
+    fn base_zhuyin_string_is_unchanged_when_no_tone_was_typed() {
+        let mut syllable = Syllable::new();
+        push_keys(&mut syllable, "su");
+        assert_eq!(syllable.base_zhuyin_string(), "ㄋㄧ");
+        assert_eq!(syllable.base_zhuyin_string(), syllable.as_zhuyin_string());
+        assert!(!syllable.has_tone());
     }
 }

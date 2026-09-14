@@ -41,16 +41,36 @@
 //! 就會出現「謝謝」「熊熊」「行銷」等兩個音節開頭都是 ㄒ 的詞。這與貪婪
 //! 最長匹配是同一套音節累積機制，只是額外多查一次縮寫索引，不影響一般
 //! 完整音節組字與自動收斂的行為。
+//!
+//! ## 不分聲調選字
+//!
+//! 使用者打完聲母／介母／韻母、但還沒（或不想）打聲調時，[`Engine::toneless_key`]
+//! 會額外查詢 [`dictionary::Dictionary::lookup_toneless`]，把同一個基底
+//! 讀音、所有聲調的候選字都併入候選字清單，不必先打對聲調才能選字。這
+//! 只在「目前正在輸入的音節」還沒打聲調時觸發；一旦打了聲調，就只會用
+//! 一般的精確比對，不會再混入其他聲調的候選字。
+//!
+//! ## 使用者自訂詞（快速填寫）
+//!
+//! 除了詞庫本身，引擎也可以掛上一份 [`user_phrases::UserPhrases`]（見該
+//! 模組文件），讓使用者自行定義「打一組注音 → 送出一段任意文字」的捷徑
+//! ——例如把地址、姓名、電話設成自訂詞，在瀏覽器或文件裡快速填寫。自訂
+//! 詞永遠優先於詞庫本身與縮寫／不分聲調的猜測結果（見
+//! [`Engine::refresh_candidates`] 的合併順序），因為那是使用者自己明確
+//! 設定的捷徑，不是引擎的猜測。
 
 pub mod dictionary;
 pub mod keyboard;
 pub mod ranking;
 pub mod syllable;
+pub mod user_phrases;
 
 pub use dictionary::{Dictionary, Entry};
+pub use user_phrases::UserPhrases;
 
 use keyboard::{StandardLayout, ZhuyinSymbol};
 use ranking::Ranker;
+use std::io;
 use syllable::{PushResult, Syllable};
 
 /// 呼叫端送入一個按鍵後，引擎的回應。
@@ -80,6 +100,8 @@ pub struct Engine {
     /// 正在輸入中的音節。
     current: Syllable,
     dictionary: Dictionary,
+    /// 使用者自訂詞（見模組文件「使用者自訂詞」），預設空。
+    user_phrases: UserPhrases,
     ranker: Ranker,
 }
 
@@ -90,8 +112,30 @@ impl Engine {
             committed: Vec::new(),
             current: Syllable::new(),
             dictionary,
+            user_phrases: UserPhrases::new(),
             ranker: Ranker::new(),
         }
+    }
+
+    /// 掛上一份使用者自訂詞庫，取代目前這份（見模組文件「使用者自訂
+    /// 詞」）。
+    pub fn set_user_phrases(&mut self, user_phrases: UserPhrases) {
+        self.user_phrases = user_phrases;
+    }
+
+    /// 目前掛載的使用者自訂詞庫，供列出／管理用。
+    pub fn user_phrases(&self) -> &UserPhrases {
+        &self.user_phrases
+    }
+
+    /// 新增一筆使用者自訂詞（見 [`UserPhrases::add`]）。
+    pub fn add_user_phrase(&mut self, code: &str, text: &str) -> io::Result<()> {
+        self.user_phrases.add(code, text)
+    }
+
+    /// 移除一筆使用者自訂詞（見 [`UserPhrases::remove`]）。
+    pub fn remove_user_phrase(&mut self, code: &str, text: &str) -> io::Result<bool> {
+        self.user_phrases.remove(code, text)
     }
 
     /// 目前組字區的注音字串（已確認音節 + 正在輸入的音節，依序串接、
@@ -211,39 +255,56 @@ impl Engine {
         None
     }
 
+    /// 依序查詢並合併四種候選字來源，順序即優先順序（見模組文件）：
+    /// 1. 使用者自訂詞（明確設定的捷徑，永遠優先）
+    /// 2. 一般詞庫精確比對
+    /// 3. 注音縮寫猜測（若符合觸發條件）
+    /// 4. 不分聲調猜測（若符合觸發條件）
+    ///
+    /// 四種來源一律用 `key`（[`Engine::full_key`]）當排序記憶鍵，因為
+    /// [`Engine::select_candidate`] 一律以它記錄使用者選字記憶——不論候選
+    /// 字最終是從哪個來源找到的，都要共用同一份個人化排序記憶才有意義。
     fn refresh_candidates(&self, flushed: Vec<String>) -> KeyOutcome {
         let buffer = self.display_buffer();
         let key = self.full_key();
-        let mut candidates: Vec<Entry> = if key.is_empty() {
-            Vec::new()
-        } else {
-            let entries = self.dictionary.lookup(&key);
-            self.ranker
-                .rank(&key, entries)
-                .into_iter()
-                .cloned()
-                .collect()
-        };
+        let mut candidates: Vec<Entry> = Vec::new();
 
+        if !key.is_empty() {
+            self.merge_ranked(&key, self.user_phrases.lookup(&key), &mut candidates);
+            self.merge_ranked(&key, self.dictionary.lookup(&key), &mut candidates);
+        }
         if let Some(code) = self.abbreviation_code() {
-            let entries = self.dictionary.lookup_abbreviation(&code);
-            // 排序仍用 `key`（而非縮寫碼）當記憶鍵，因為 `select_candidate`
-            // 一律以 `full_key()` 記錄使用者選字記憶（見該方法），縮寫來的
-            // 候選字要跟一般候選字共用同一份個人化記憶才有意義。
-            for candidate in self.ranker.rank(&key, entries) {
-                if !candidates
-                    .iter()
-                    .any(|existing| existing.word == candidate.word)
-                {
-                    candidates.push(candidate.clone());
-                }
-            }
+            self.merge_ranked(
+                &key,
+                self.dictionary.lookup_abbreviation(&code),
+                &mut candidates,
+            );
+        }
+        if let Some(base) = self.toneless_key() {
+            self.merge_ranked(
+                &key,
+                self.dictionary.lookup_toneless(&base),
+                &mut candidates,
+            );
         }
 
         KeyOutcome::Composing {
             flushed,
             buffer,
             candidates,
+        }
+    }
+
+    /// 依 `rank_key` 排序 `entries`，把還沒出現過（依詞比對）的候選字
+    /// 依序附加到 `candidates` 尾端。
+    fn merge_ranked(&self, rank_key: &str, entries: &[Entry], candidates: &mut Vec<Entry>) {
+        for candidate in self.ranker.rank(rank_key, entries) {
+            if !candidates
+                .iter()
+                .any(|existing| existing.word == candidate.word)
+            {
+                candidates.push(candidate.clone());
+            }
         }
     }
 
@@ -270,6 +331,25 @@ impl Engine {
             code.push_str(&zhuyin);
         }
         Some(code)
+    }
+
+    /// 若正在輸入中的音節已經可查詢（聲母／介母／韻母至少有一個）但還
+    /// 沒打聲調，回傳「已確認音節＋正在輸入中的音節，一律拿掉聲調」的
+    /// 字串，供 [`dictionary::Dictionary::lookup_toneless`] 查詢；否則
+    /// 回傳 `None`（例如組字區還是空的，或使用者已經打了聲調——這種情況
+    /// 只該用一般精確比對，不該混入其他聲調的候選字，見模組文件「不分
+    /// 聲調選字」）。
+    fn toneless_key(&self) -> Option<String> {
+        if !self.current.is_ready() || self.current.has_tone() {
+            return None;
+        }
+        let mut parts: Vec<String> = self
+            .committed
+            .iter()
+            .map(Syllable::base_zhuyin_string)
+            .collect();
+        parts.push(self.current.base_zhuyin_string());
+        Some(parts.join(" "))
     }
 
     /// 供畫面顯示用的組字區內容：已確認音節與正在輸入的音節依序串接，
@@ -672,6 +752,146 @@ mod tests {
         );
     }
 
+    /// 台／太／胎都讀 ㄊㄞ，只是聲調不同，用來驗證「不分聲調選字」
+    /// （見模組文件）。
+    fn toneless_dictionary() -> Dictionary {
+        Dictionary::parse(
+            "ㄊㄞˊ\t台\t3000\n\
+             ㄊㄞˋ\t太\t5000\n\
+             ㄊㄞ\t胎\t500\n\
+             ㄏㄠˇ\t好\t9000\n",
+        )
+    }
+
+    #[test]
+    fn typing_a_base_reading_without_a_tone_shows_candidates_across_every_tone() {
+        let mut engine = Engine::new(toneless_dictionary());
+
+        // 台 = ㄊㄞˊ : w(ㄊ) 9(ㄞ)，故意不打聲調 6。
+        engine.key_press('w');
+        let outcome = engine.key_press('9');
+
+        let KeyOutcome::Composing {
+            buffer, candidates, ..
+        } = outcome
+        else {
+            panic!("expected Composing outcome");
+        };
+        assert_eq!(buffer, "ㄊㄞ");
+        let mut words: Vec<&str> = candidates.iter().map(|e| e.word.as_str()).collect();
+        words.sort();
+        assert_eq!(words, vec!["台", "太", "胎"]);
+    }
+
+    #[test]
+    fn typing_the_tone_narrows_back_down_to_the_exact_match() {
+        let mut engine = Engine::new(toneless_dictionary());
+
+        engine.key_press('w');
+        engine.key_press('9');
+        // 補上聲調 6（ˊ），應該收斂回精確比對，不再混入其他聲調。
+        let outcome = engine.key_press('6');
+        let KeyOutcome::Composing { candidates, .. } = outcome else {
+            panic!("expected Composing outcome");
+        };
+        assert_eq!(
+            candidates,
+            vec![Entry {
+                word: "台".into(),
+                frequency: 3000
+            }],
+            "打了聲調後應該只精確比對，不該混入「太」「胎」"
+        );
+    }
+
+    #[test]
+    fn toneless_candidate_can_be_selected_like_a_normal_one() {
+        let mut engine = Engine::new(toneless_dictionary());
+        engine.key_press('w');
+        engine.key_press('9');
+        let committed = engine.select_candidate("太");
+        assert_eq!(committed, "太");
+        assert_eq!(engine.buffer(), "");
+    }
+
+    #[test]
+    fn empty_buffer_does_not_trigger_toneless_matching() {
+        let engine = Engine::new(toneless_dictionary());
+        assert_eq!(engine.toneless_key(), None);
+    }
+
+    // 使用者自訂詞的注音碼可以是任何打得出來的音節字串，不必對應真實
+    // 讀音——底下範例統一用 z(ㄈ) 這個單一聲母當捷徑代碼，打一個鍵就
+    // 能叫出候選字（單一聲母就已經 `is_ready()`，不必等第二個音節）。
+
+    #[test]
+    fn user_phrase_candidates_take_priority_over_the_dictionary() {
+        let dict = Dictionary::parse("ㄈ\t分\t1000\n");
+        let mut engine = Engine::new(dict);
+        engine
+            .add_user_phrase("ㄈ", "台北市大安區羅斯福路四段1號")
+            .unwrap();
+
+        let outcome = engine.key_press('z');
+        let KeyOutcome::Composing {
+            buffer, candidates, ..
+        } = outcome
+        else {
+            panic!("expected Composing outcome");
+        };
+        assert_eq!(buffer, "ㄈ");
+        assert_eq!(
+            candidates[0].word, "台北市大安區羅斯福路四段1號",
+            "使用者自訂詞應該排在詞庫候選字最前面"
+        );
+        assert!(candidates.iter().any(|e| e.word == "分"));
+    }
+
+    #[test]
+    fn selecting_a_user_phrase_works_like_any_other_candidate() {
+        let mut engine = Engine::new(Dictionary::new());
+        engine.add_user_phrase("ㄈ", "台北市大安區").unwrap();
+        engine.key_press('z');
+        let committed = engine.select_candidate("台北市大安區");
+        assert_eq!(committed, "台北市大安區");
+        assert_eq!(engine.buffer(), "");
+    }
+
+    #[test]
+    fn removing_a_user_phrase_stops_it_from_appearing() {
+        let mut engine = Engine::new(Dictionary::new());
+        engine.add_user_phrase("ㄈ", "台北市大安區").unwrap();
+        assert!(engine.remove_user_phrase("ㄈ", "台北市大安區").unwrap());
+
+        let outcome = engine.key_press('z');
+        let KeyOutcome::Composing { candidates, .. } = outcome else {
+            panic!("expected Composing outcome");
+        };
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn set_user_phrases_replaces_the_whole_set() {
+        let mut engine = Engine::new(Dictionary::new());
+        engine.add_user_phrase("ㄈ", "舊地址").unwrap();
+
+        let mut replacement = UserPhrases::new();
+        replacement.add("ㄈ", "新地址").unwrap();
+        engine.set_user_phrases(replacement);
+
+        let outcome = engine.key_press('z');
+        let KeyOutcome::Composing { candidates, .. } = outcome else {
+            panic!("expected Composing outcome");
+        };
+        assert_eq!(
+            candidates,
+            vec![Entry {
+                word: "新地址".into(),
+                frequency: user_phrases::USER_PHRASE_FREQUENCY
+            }]
+        );
+    }
+
     #[test]
     fn backspace_uncommits_the_last_syllable_one_symbol_at_a_time() {
         let mut engine = Engine::new(phrase_dictionary());
@@ -688,7 +908,17 @@ mod tests {
                 buffer, candidates, ..
             } => {
                 assert_eq!(buffer, "ㄋㄧˇㄏㄠ", "應該只刪掉「好」的聲調，不是整個音節");
-                assert!(candidates.is_empty(), "ㄏㄠ（無聲調）不是任何詞的完整讀音");
+                // 「好」的聲調被刪掉後，雖然還不是「ㄏㄠˇ」的精確比對，
+                // 但「不分聲調選字」（見模組文件）讓「你好」還是能透過
+                // toneless 比對找到，不必重新打一次聲調。
+                assert_eq!(
+                    candidates,
+                    vec![Entry {
+                        word: "你好".into(),
+                        frequency: 1227
+                    }],
+                    "刪掉聲調後仍應能靠不分聲調選字找到「你好」"
+                );
             }
             other => panic!("unexpected outcome: {other:?}"),
         }

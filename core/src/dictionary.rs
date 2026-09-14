@@ -22,7 +22,16 @@
 //! 用這個縮寫碼查詞，讓使用者只打每個字的第一個符號就能叫出候選字，
 //! 只建立在至少兩個音節的詞條上（見 [`Dictionary::parse`]），單音節詞
 //! 不會被收進這個索引，避免縮寫查詢被大量單字候選字淹沒。
+//!
+//! ## 不分聲調選字
+//!
+//! 使用者常常只想打完聲母／介母／韻母、不特別指定聲調就選字（尤其是
+//! 記不清或懶得打聲調的時候）。[`Dictionary::lookup_toneless`] 用「拿掉
+//! 每個音節聲調後的字串」（`toneless_index`，見
+//! [`crate::keyboard::TONE_MARKS`]）當鍵，把同一個基底讀音、不同聲調的
+//! 候選字全部找出來，讓使用者不必先打聲調才能選字。
 
+use crate::keyboard::TONE_MARKS;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -44,6 +53,8 @@ pub struct Dictionary {
     /// 縮寫碼（每個音節的第一個符號串起來） -> 候選字，只收多音節詞條
     /// （見模組說明「注音縮寫輸入」）。
     abbreviation_index: HashMap<String, Vec<Entry>>,
+    /// 拿掉每個音節聲調後的字串 -> 候選字（見模組說明「不分聲調選字」）。
+    toneless_index: HashMap<String, Vec<Entry>>,
 }
 
 impl Dictionary {
@@ -62,6 +73,7 @@ impl Dictionary {
         let mut entries: HashMap<String, Vec<Entry>> = HashMap::new();
         let mut valid_prefixes: HashSet<String> = HashSet::new();
         let mut abbreviation_index: HashMap<String, Vec<Entry>> = HashMap::new();
+        let mut toneless_index: HashMap<String, Vec<Entry>> = HashMap::new();
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -80,6 +92,7 @@ impl Dictionary {
             let mut prefix = String::new();
             let mut syllable_count = 0;
             let mut abbreviation_code = String::new();
+            let mut toneless_parts: Vec<&str> = Vec::new();
             for syllable in zhuyin.split(' ') {
                 if !prefix.is_empty() {
                     prefix.push(' ');
@@ -90,6 +103,7 @@ impl Dictionary {
                 if let Some(leading) = syllable.chars().next() {
                     abbreviation_code.push(leading);
                 }
+                toneless_parts.push(strip_tone(syllable));
             }
 
             let entry = Entry {
@@ -102,12 +116,17 @@ impl Dictionary {
                     .or_default()
                     .push(entry.clone());
             }
+            toneless_index
+                .entry(toneless_parts.join(" "))
+                .or_default()
+                .push(entry.clone());
             entries.entry(zhuyin.to_string()).or_default().push(entry);
         }
         Self {
             entries,
             valid_prefixes,
             abbreviation_index,
+            toneless_index,
         }
     }
 
@@ -136,6 +155,17 @@ impl Dictionary {
             .unwrap_or(&[])
     }
 
+    /// 依「拿掉聲調的讀音」（見模組說明「不分聲調選字」）查詢候選字，
+    /// 找不到時回傳空陣列。`base` 應該是每個音節只有聲母／介母／韻母、
+    /// 以空白分隔的字串（見
+    /// [`crate::syllable::Syllable::base_zhuyin_string`]）。
+    pub fn lookup_toneless(&self, base: &str) -> &[Entry] {
+        self.toneless_index
+            .get(base)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     /// 詞庫中的候選字（詞）總數。
     pub fn len(&self) -> usize {
         self.entries.values().map(Vec::len).sum()
@@ -143,6 +173,16 @@ impl Dictionary {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// 拿掉一個音節字串結尾的聲調符號（若有）。聲調恆是
+/// [`crate::syllable::Syllable::as_zhuyin_string`] 的最後一個字元，所以
+/// 只需要檢查最後一個字元是否屬於 [`TONE_MARKS`]。
+fn strip_tone(syllable: &str) -> &str {
+    match syllable.chars().next_back() {
+        Some(last) if TONE_MARKS.contains(&last) => &syllable[..syllable.len() - last.len_utf8()],
+        _ => syllable,
     }
 }
 
@@ -265,5 +305,40 @@ mod tests {
     fn abbreviation_lookup_with_no_match_returns_empty_slice() {
         let dict = Dictionary::parse("ㄋㄧˇ ㄏㄠˇ\t你好\t1227\n");
         assert!(dict.lookup_abbreviation("ㄒㄒ").is_empty());
+    }
+
+    #[test]
+    fn toneless_lookup_finds_words_across_every_tone_of_the_same_base_reading() {
+        let dict = Dictionary::parse(
+            "ㄊㄞˊ\t台\t3000\n\
+             ㄊㄞˋ\t太\t5000\n\
+             ㄊㄞ\t胎\t500\n\
+             ㄏㄠˇ\t好\t9000\n",
+        );
+        let mut words: Vec<&str> = dict
+            .lookup_toneless("ㄊㄞ")
+            .iter()
+            .map(|e| e.word.as_str())
+            .collect();
+        words.sort();
+        assert_eq!(words, vec!["台", "太", "胎"]);
+    }
+
+    #[test]
+    fn toneless_lookup_also_works_across_multi_syllable_phrases() {
+        let dict = Dictionary::parse("ㄋㄧˇ ㄏㄠˇ\t你好\t1227\n");
+        assert_eq!(
+            dict.lookup_toneless("ㄋㄧ ㄏㄠ"),
+            &[Entry {
+                word: "你好".into(),
+                frequency: 1227
+            }]
+        );
+    }
+
+    #[test]
+    fn toneless_lookup_with_no_match_returns_empty_slice() {
+        let dict = Dictionary::parse("ㄊㄞˊ\t台\t3000\n");
+        assert!(dict.lookup_toneless("ㄏㄠ").is_empty());
     }
 }

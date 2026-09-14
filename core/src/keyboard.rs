@@ -41,6 +41,13 @@ macro_rules! symbol {
     };
 }
 
+/// 四個聲調符號（第一聲無符號，不列在這裡）。在任何注音字串裡，聲調
+/// 永遠是最後一個字元（見 [`crate::syllable::Syllable::as_zhuyin_string`]
+/// 的組成順序），所以只要檢查字串最後一個字元是否屬於這個集合，就能判斷
+/// 一個音節字串有沒有指定聲調（見
+/// [`crate::dictionary::Dictionary::lookup_toneless`]）。
+pub const TONE_MARKS: [char; 4] = ['ˊ', 'ˇ', 'ˋ', '˙'];
+
 /// 大千式（Windows 內建標準）注音鍵盤佈局：將 QWERTY 按鍵對應到注音符號。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StandardLayout;

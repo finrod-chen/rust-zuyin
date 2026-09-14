@@ -13,8 +13,10 @@
 core/           Rust library，注音轉換核心引擎，純邏輯、可獨立測試
   keyboard.rs   注音鍵盤佈局定義（目前實作大千式）
   syllable.rs   單一音節的狀態機
-  dictionary.rs 詞庫查詢；也維護多音節詞的「合法前綴」索引
+  dictionary.rs 詞庫查詢；也維護多音節詞的「合法前綴」索引、縮寫索引、
+                不分聲調索引
   ranking.rs    候選字排序（詞頻 + 使用者選字記憶）
+  user_phrases.rs 使用者自訂詞（地址／姓名／電話等快速填寫捷徑）
   lib.rs        Engine：多音節組字狀態機，實作貪婪最長匹配（見下）
   tests/        對隨附詞庫檔案（data/chewing-characters.txt）的整合測試
 backend/        Rust binary，實作 PIME backend 通訊協定，橋接 core engine
@@ -29,6 +31,9 @@ data/
   chewing-characters.txt  正式詞庫：轉換自 libchewing-data 的單字讀音與
                            多字詞，約 16 萬筆、附真實詞頻，backend 預設
                            載入這份
+  user_phrases.example.txt 使用者自訂詞範例格式（實際使用請複製成
+                           repo 根目錄的 user_phrases.txt，見上方「使用者
+                           自訂詞」說明）
 docs/
   PROJECT_PLAN.md          完整專案企劃書
   PIME_PROTOCOL.md         PIME 官方後端通訊協定研究筆記
@@ -52,6 +57,21 @@ docs/
   ㄒ（不接任何介母／韻母／聲調）會候選「謝謝」「熊熊」「行銷」等兩個
   音節開頭都是 ㄒ 的詞（見 `core/src/lib.rs` 模組文件「注音縮寫輸入」與
   `core/src/dictionary.rs` 的 `lookup_abbreviation`）。
+  **不分聲調選字**：打完聲母／介母／韻母、還沒（或不想）打聲調時，也
+  能直接選字——引擎會把同一個基底讀音、所有聲調的候選字都列出來，例如
+  打 ㄊㄞ（不接聲調）會同時列出「台」「太」「胎」，不必先打對聲調才能
+  選（見 `core/src/lib.rs` 模組文件「不分聲調選字」與
+  `core/src/dictionary.rs` 的 `lookup_toneless`）。
+  **使用者自訂詞（快速填寫）**：可以自己定義「打一組注音 → 送出一段
+  任意文字」的捷徑，例如把地址、姓名、電話設成自訂詞，在瀏覽器或文件
+  裡快速填寫（見 `core/src/user_phrases.rs`）。自訂詞一律排在候選字清單
+  最前面。目前的使用方式是直接編輯自訂詞檔案（預設路徑
+  `user_phrases.txt`，格式見 `data/user_phrases.example.txt`；這個檔案
+  不會被版本控制追蹤，見 `.gitignore`），`zuyin-backend` 啟動時會自動
+  載入；透過 PIME 介面直接新增／刪除自訂詞則有待未來擴充（PIME 的線路
+  協定沒有通用文字輸入框，見 `docs/PIME_PROTOCOL.md`），但 `core::Engine`
+  已經有 `add_user_phrase`／`remove_user_phrase` 這組程式介面可供未來的
+  設定介面呼叫。
 - **Phase 2（PIME 整合）進行中**：`backend/` 已實作與官方 Python 範例後端
   相同的 stdin/stdout 線路協定（`<client_id>|json` 請求／
   `PIME_MSG|<client_id>|json` 回應、`init`／`onActivate`／`filterKeyDown`／
@@ -74,12 +94,17 @@ cargo build --workspace
 # 執行所有單元測試
 cargo test --workspace
 
-# 手動試跑 backend（預設載入 data/chewing-characters.txt 正式詞庫，
-# 透過 stdin 逐行送入 PIME 協定訊息）
+# 手動試跑 backend（預設載入 data/chewing-characters.txt 正式詞庫、
+# user_phrases.txt 使用者自訂詞（不存在時視為空，不是錯誤），透過 stdin
+# 逐行送入 PIME 協定訊息）
 cargo run -p zuyin-backend
 
 # 想用文件範例裡的小型詞庫（下面範例、單元測試用的就是這份）：
 cargo run -p zuyin-backend -- data/dict.txt
+
+# 想順便試用自訂詞範例（見 data/user_phrases.example.txt）：
+cp data/user_phrases.example.txt user_phrases.txt
+cargo run -p zuyin-backend -- data/chewing-characters.txt user_phrases.txt
 
 # 重新產生 data/chewing-characters.txt（來源與授權見
 # docs/THIRD_PARTY_NOTICES.md）：
@@ -165,3 +190,27 @@ c1|{"method":"onKeyDown","seqNum":12,"charCode":118,"keyCode":86,"keyStates":[]}
 PIME_MSG|c1|{"success":true,"seqNum":11,"return":true,"compositionString":"ㄒ","candidateList":["ㄒ"],"showCandidates":true}
 PIME_MSG|c1|{"success":true,"seqNum":12,"return":true,"compositionString":"ㄒㄒ","candidateList":["謝謝","行銷","熊熊", "..."],"showCandidates":true}
 ```
+
+打完聲母／介母／韻母、不接聲調也能直接選字——候選字會列出同一個讀音
+所有聲調的字，例如打 `w`（ㄊ）`9`（ㄞ）不按聲調鍵：
+
+```text
+c1|{"method":"onKeyDown","seqNum":13,"charCode":119,"keyCode":87,"keyStates":[]}
+c1|{"method":"onKeyDown","seqNum":14,"charCode":57,"keyCode":57,"keyStates":[]}
+
+PIME_MSG|c1|{"success":true,"seqNum":13,"return":true,"compositionString":"ㄊ","candidateList":[],"showCandidates":false}
+PIME_MSG|c1|{"success":true,"seqNum":14,"return":true,"compositionString":"ㄊㄞ","candidateList":["台","太","抬","胎","..."],"showCandidates":true}
+```
+
+如果載入了使用者自訂詞（見上方「使用者自訂詞」說明），打對應的捷徑
+注音碼會直接叫出自訂文字，且排在詞庫候選字最前面；下例載入了
+`data/user_phrases.example.txt`，打一個 `ㄉ`（鍵盤上是 `2`）：
+
+```text
+c1|{"method":"onKeyDown","seqNum":15,"charCode":50,"keyCode":50,"keyStates":[]}
+
+PIME_MSG|c1|{"success":true,"seqNum":15,"return":true,"compositionString":"ㄉ","candidateList":["台北市大安區羅斯福路四段1號"],"showCandidates":true}
+```
+
+選這個候選字就會把整段地址當作 `commitString` 送出，直接貼進瀏覽器
+表單或文件裡的輸入欄位。

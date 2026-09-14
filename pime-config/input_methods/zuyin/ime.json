@@ -1,0 +1,11 @@
+{
+	"name": "Rust 注音輸入法",
+	"version": "0.1",
+	"guid": "{47CC7030-55E9-4C14-B14F-8B4EAD051BA8}",
+	"locale": "zh-Hant-TW",
+	"fallbackLocale": "zh-TW",
+	"icon": "",
+	"win8_icon": "",
+	"moduleName": "",
+	"serviceName": ""
+}

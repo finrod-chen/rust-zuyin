@@ -26,7 +26,24 @@ use zuyin_core::{Dictionary, KeyboardLayout, UserPhrases};
 /// 使用者自訂詞庫的預設路徑（見 `zuyin_core::user_phrases` 模組文件）。
 /// 刻意放在 repo 根目錄、不放進 `data/`：裡面可能是使用者自己的地址、
 /// 姓名、電話等個人資料，不該被打包進版本控制（見 `.gitignore`）。
+///
+/// 只在本機以原始碼開發／執行測試時才會用到這個相對路徑；透過 PIME 安裝
+/// 到系統路徑（例如 `C:\Program Files (x86)\PIME\`）執行時，一般使用者
+/// 通常沒有那個資料夾的寫入權限，[`default_user_phrases_path`] 會改用
+/// 每個使用者自己可寫入的路徑。
 const DEFAULT_USER_PHRASES_PATH: &str = "user_phrases.txt";
+
+/// 沒有透過命令列指定使用者自訂詞路徑時的預設值：Windows 上優先採用
+/// `%APPDATA%\rust-zuyin\user_phrases.txt`（每個使用者自己的設定資料夾，
+/// 一定有寫入權限，即使 `zuyin-backend.exe` 本身裝在系統共用路徑下也
+/// 不受影響）；`APPDATA` 環境變數不存在時（例如本機以原始碼開發、或在
+/// 非 Windows 平台上執行測試），退回原本「執行檔所在目錄」的相對路徑。
+fn default_user_phrases_path() -> String {
+    match env::var("APPDATA") {
+        Ok(appdata) => format!("{appdata}\\rust-zuyin\\user_phrases.txt"),
+        Err(_) => DEFAULT_USER_PHRASES_PATH.to_string(),
+    }
+}
 
 /// 啟動時載入好、之後每個新 client session 都要套用的設定（見
 /// `dispatch` 的 `Request::Init` 分支）。
@@ -41,9 +58,7 @@ fn main() -> io::Result<()> {
     let dict_path = args
         .next()
         .unwrap_or_else(|| "data/chewing-characters.txt".to_string());
-    let user_phrases_path = args
-        .next()
-        .unwrap_or_else(|| DEFAULT_USER_PHRASES_PATH.to_string());
+    let user_phrases_path = args.next().unwrap_or_else(default_user_phrases_path);
     let layout = args
         .next()
         .map(|arg| parse_layout(&arg))
@@ -651,6 +666,35 @@ mod tests {
             KeyboardLayout::default(),
             "無法辨識的佈局應該退回預設的大千式，而不是崩潰或忽略"
         );
+    }
+
+    // 這兩個測試會暫時改動行程共用的 APPDATA 環境變數；本檔案沒有其他
+    // 測試會讀寫它，執行完會還原成原本的值，避免影響同一個測試行程裡
+    // 其他（未來新增的）測試。
+    #[test]
+    fn default_user_phrases_path_uses_appdata_when_set() {
+        let previous = env::var("APPDATA").ok();
+        env::set_var("APPDATA", r"C:\Users\Someone\AppData\Roaming");
+        let path = default_user_phrases_path();
+        match previous {
+            Some(value) => env::set_var("APPDATA", value),
+            None => env::remove_var("APPDATA"),
+        }
+        assert_eq!(
+            path,
+            r"C:\Users\Someone\AppData\Roaming\rust-zuyin\user_phrases.txt"
+        );
+    }
+
+    #[test]
+    fn default_user_phrases_path_falls_back_without_appdata() {
+        let previous = env::var("APPDATA").ok();
+        env::remove_var("APPDATA");
+        let path = default_user_phrases_path();
+        if let Some(value) = previous {
+            env::set_var("APPDATA", value);
+        }
+        assert_eq!(path, DEFAULT_USER_PHRASES_PATH);
     }
 
     #[test]

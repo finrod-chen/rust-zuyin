@@ -1,0 +1,8 @@
+[
+	{
+		"name": "rust-zuyin",
+		"command": "rust-zuyin\\zuyin-backend.exe",
+		"workingDir": "rust-zuyin",
+		"params": ""
+	}
+]

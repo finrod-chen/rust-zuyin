@@ -49,17 +49,22 @@ jobs:
 
       # 單獨一個 exe 沒有詞庫檔案跑不起來（預設會找同目錄下的
       # data/chewing-characters.txt），所以額外打包一份「解壓即可用」的
-      # zip；同時也保留單獨的 exe 檔案，給只想自己指定詞庫路徑的人用。
+      # zip——同時也帶上 pime-config/ 與安裝腳本，讓這份 zip 本身就是完整
+      # 的安裝包（見 README.md「安裝到 Windows」）；也保留單獨的 exe 檔案，
+      # 給只想自己指定詞庫路徑的人用。
       - name: Stage release files
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path dist/data | Out-Null
+          New-Item -ItemType Directory -Force -Path dist/scripts | Out-Null
           Copy-Item target/release/zuyin-backend.exe dist/
           Copy-Item data/chewing-characters.txt dist/data/
           Copy-Item data/user_phrases.example.txt dist/data/
           Copy-Item README.md dist/
           Copy-Item docs/THIRD_PARTY_NOTICES.md dist/
+          Copy-Item pime-config dist/pime-config -Recurse
+          Copy-Item scripts/install-windows.ps1 dist/scripts/
           Compress-Archive -Path dist/* -DestinationPath zuyin-backend-windows-x64.zip -Force
 
           $shortSha = "${{ github.sha }}".Substring(0, 7)

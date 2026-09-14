@@ -23,9 +23,12 @@ backend/        Rust binary，實作 PIME backend 通訊協定，橋接 core eng
   protocol.rs   stdin/stdout 線路格式與 PIME 訊息（method／KeyEvent／回應欄位）
   session.rs    每個 TSF client 對應一個 Session：按鍵分類、組字狀態機
   main.rs       多 client 連線管理（對應官方 Server／Client）
-pime-config/    PIME 設定檔預留目錄（尚未串上 PIMELauncher）
+pime-config/    向 PIME 註冊 zuyin-backend 所需的設定檔（backends.json／
+                ime.json），見該目錄下的 README.md
 scripts/
   convert_chewing_dictionary.py  把 libchewing-data 轉成本專案詞庫格式
+  install-windows.ps1            把 zuyin-backend 安裝進已裝好的 PIME
+                                  （見下方「安裝到 Windows」）
 data/
   dict.txt                範例詞庫（手工撰寫，供文件範例與快速測試使用）
   chewing-characters.txt  正式詞庫：轉換自 libchewing-data 的單字讀音與
@@ -107,7 +110,33 @@ docs/
 不是對應某個版本號，而是永遠反映 `main` 分支最新 commit（見
 `.github/workflows/release.yml`）。下載 `zuyin-backend-windows-x64.zip`
 解壓後可直接執行 `zuyin-backend.exe`（已內附 `data/chewing-characters.txt`
-正式詞庫）。
+正式詞庫、`pime-config/`、`scripts/install-windows.ps1`，見下方「安裝到
+Windows」）；手動用 `cargo run -p zuyin-backend` 或直接執行
+`zuyin-backend.exe` 跑起來的，只是能透過 stdin/stdout 手動送 JSON 訊息
+測試協定，**不會**出現在 Windows 的輸入法清單裡、也不會在任何應用程式
+跳出候選字視窗——要真的能在系統裡打字，還需要下面這一步。
+
+## 安裝到 Windows
+
+`zuyin-backend.exe` 本身只是一個講 PIME 線路協定的背景程式，要讓 Windows
+真的把它當作一個可選的輸入法，還需要
+[PIME](https://github.com/EasyIME/PIME)（本專案不重新包裝、也不重新
+散布，需要另外安裝）負責跟 TSF／候選字視窗整合，並且把 `zuyin-backend`
+註冊成它認得的一個 backend：
+
+```powershell
+# 1. 先從 https://github.com/EasyIME/PIME 安裝 PIME
+# 2. 解壓縮 zuyin-backend-windows-x64.zip（或自己 cargo build --release），
+#    在該目錄下以系統管理員權限執行（沒有的話腳本會自動要求）：
+.\scripts\install-windows.ps1
+```
+
+這支腳本會把 `zuyin-backend.exe`、詞庫、`pime-config/` 底下的設定檔複製到
+PIME 安裝路徑，合併進 PIME 的 `backends.json`（不會動到其他既有的輸入法
+設定），並重新啟動 `PIMELauncher.exe`。細節、每個設定檔的格式依據、以及
+**目前還沒有在真正的 Windows 環境驗證過**這件事，見
+[`pime-config/README.md`](pime-config/README.md) 與
+[`docs/PIME_PROTOCOL.md`](docs/PIME_PROTOCOL.md)「安裝／註冊」一節。
 
 ## 開發
 

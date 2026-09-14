@@ -29,7 +29,7 @@
 //! 兩個獨立的識別空間，詳見 `docs/PIME_PROTOCOL.md`。
 
 use crate::protocol::KeyEventData;
-use zuyin_core::{Dictionary, Engine, KeyOutcome, UserPhrases};
+use zuyin_core::{Dictionary, Engine, KeyOutcome, KeyboardLayout, UserPhrases};
 
 const VK_BACK: u32 = 0x08;
 const VK_ESCAPE: u32 = 0x1B;
@@ -220,6 +220,11 @@ impl Session {
         self.engine.set_user_phrases(user_phrases);
     }
 
+    /// 切換注音鍵盤佈局（見 `zuyin_core` 的 `keyboard` 模組文件）。
+    pub fn set_layout(&mut self, layout: KeyboardLayout) {
+        self.engine.set_layout(layout);
+    }
+
     pub fn on_activate(&mut self, is_keyboard_open: bool) {
         self.is_activated = true;
         self.keyboard_open = is_keyboard_open;
@@ -257,6 +262,11 @@ impl Session {
 
     fn reset_composition(&mut self) {
         self.engine.clear();
+        // 應用程式切換或輸入框失焦（觸發這個函式的幾個事件：
+        // on_deactivate／on_composition_terminated／中英切換）代表接下來
+        // 打的字，跟前面已經送出的字不一定有語意關聯，bigram 排序的上下文
+        // 也該跟著清空（見 zuyin_core 的 bigram 模組文件）。
+        self.engine.reset_context();
         self.show_candidates = false;
         self.last_candidates.clear();
     }
@@ -381,13 +391,24 @@ impl Session {
         }
 
         if self.show_candidates {
-            if let Some(index) = digit_selection_index(event.key_code) {
-                if index < self.last_candidates.len() {
-                    return KeyAction::SelectCandidate(index);
+            // 「不分聲調選字」（見 zuyin_core 模組文件）可能讓候選字視窗
+            // 在使用者打完聲調「之前」就已經開啟；這時如果單純因為候選字
+            // 視窗開著就把數字鍵一律當成選字鍵，會誤吃掉接下來要打的聲調
+            // 數字鍵（ㄅㄉㄓ以外的數字鍵大多是聲調）。只要這個鍵還能繼續
+            // 填進正在輸入中的音節，就優先當組字鍵，不當選字鍵。
+            let continues_composition = !event.has_shift()
+                && event
+                    .printable_char()
+                    .is_some_and(|ch| self.engine.extends_current_syllable(ch));
+            if !continues_composition {
+                if let Some(index) = digit_selection_index(event.key_code) {
+                    if index < self.last_candidates.len() {
+                        return KeyAction::SelectCandidate(index);
+                    }
                 }
-            }
-            if event.key_code == VK_SPACE || event.key_code == VK_RETURN {
-                return KeyAction::CommitTop;
+                if event.key_code == VK_SPACE || event.key_code == VK_RETURN {
+                    return KeyAction::CommitTop;
+                }
             }
         }
 
@@ -600,6 +621,48 @@ mod tests {
                 candidates: vec![],
                 show_candidates: false
             }
+        );
+    }
+
+    #[test]
+    fn tone_key_still_composes_even_though_toneless_matching_already_opened_the_candidate_window() {
+        // 好／號／毫都讀 ㄏㄠ（只差聲調），「不分聲調選字」讓候選字視窗
+        // 在使用者打完聲調前就先開啟。這裡打完 ㄏㄠ（還沒打聲調）候選字
+        // 清單剛好有 3 個（好、號、毫），而「3」這個鍵剛好同時是「好」的
+        // 聲調鍵、也是候選字視窗開啟時「選第 3 個候選字」的按鍵——應該
+        // 優先當成繼續組字（聲調槽位還空著），而不是誤選成「毫」。
+        let dict = Dictionary::parse("ㄏㄠˇ\t好\t9000\nㄏㄠˋ\t號\t500\nㄏㄠˊ\t毫\t100\n");
+        let mut session = Session::new(dict);
+        session.on_activate(true);
+
+        session.on_key_down(&key('c' as u32, 0x43)); // ㄏ
+        let outcome = session.on_key_down(&key('l' as u32, 0x4C)); // ㄠ
+        assert_eq!(
+            outcome,
+            KeyDownOutcome::Composing {
+                flushed: String::new(),
+                buffer: "ㄏㄠ".into(),
+                candidates: vec!["好".into(), "號".into(), "毫".into()],
+                show_candidates: true,
+            },
+            "不分聲調選字應該已經在打完聲調前列出候選字"
+        );
+
+        let tone3 = key('3' as u32, 0x33);
+        assert!(
+            session.filter_key_down(&tone3),
+            "這個鍵無論被當成聲調鍵還是選字鍵，這個輸入法都該吃下"
+        );
+        let outcome = session.on_key_down(&tone3);
+        assert_eq!(
+            outcome,
+            KeyDownOutcome::Composing {
+                flushed: String::new(),
+                buffer: "ㄏㄠˇ".into(),
+                candidates: vec!["好".into()],
+                show_candidates: true,
+            },
+            "「3」應該被當成「好」的聲調鍵繼續組字，不該被誤判成選字選到「毫」"
         );
     }
 

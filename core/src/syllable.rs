@@ -44,6 +44,18 @@ impl Syllable {
         *self = Self::default();
     }
 
+    /// 這個類別的槽位是否已經填過。用於在不實際送入符號的情況下，預先
+    /// 判斷 [`Syllable::push`] 會不會被拒絕（例如
+    /// `crate::Engine::extends_current_syllable`）。
+    pub fn has(&self, kind: SymbolKind) -> bool {
+        match kind {
+            SymbolKind::Initial => self.initial.is_some(),
+            SymbolKind::Medial => self.medial.is_some(),
+            SymbolKind::Final => self.r#final.is_some(),
+            SymbolKind::Tone => self.tone.is_some(),
+        }
+    }
+
     /// 送入一個已由鍵盤佈局解析出的注音符號。
     ///
     /// 同一類別的符號只能出現一次；重複送入會被拒絕，呼叫端可依此判斷
@@ -216,6 +228,18 @@ mod tests {
         assert_eq!(syllable.as_zhuyin_string(), "ㄋㄧˇ");
         assert_eq!(syllable.base_zhuyin_string(), "ㄋㄧ");
         assert!(syllable.has_tone());
+    }
+
+    #[test]
+    fn has_reports_which_slots_are_filled() {
+        let mut syllable = Syllable::new();
+        assert!(!syllable.has(SymbolKind::Initial));
+        assert!(!syllable.has(SymbolKind::Tone));
+        push_keys(&mut syllable, "su"); // ㄋ(Initial) ㄧ(Medial)
+        assert!(syllable.has(SymbolKind::Initial));
+        assert!(syllable.has(SymbolKind::Medial));
+        assert!(!syllable.has(SymbolKind::Final));
+        assert!(!syllable.has(SymbolKind::Tone));
     }
 
     #[test]

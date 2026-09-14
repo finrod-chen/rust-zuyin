@@ -30,6 +30,16 @@
 //! 每個音節聲調後的字串」（`toneless_index`，見
 //! [`crate::keyboard::TONE_MARKS`]）當鍵，把同一個基底讀音、不同聲調的
 //! 候選字全部找出來，讓使用者不必先打聲調才能選字。
+//!
+//! ## 詞頻反查（供基本 bigram 排序使用）
+//!
+//! [`Dictionary::word_frequency`] 用「文字本身」（而不是注音）當鍵反查
+//! 詞頻——同一個文字若有多種讀音（多筆詞條），取最高的詞頻。這其實就是
+//! 詞庫裡本來就有的真實語料詞頻，只是換一個角度查：[`crate::Engine`]
+//! 拿它來做「基本 bigram 詞頻排序」（見該模組文件）——判斷「剛剛送出的
+//! 字 + 目前這個候選字」兩個字連在一起是不是詞庫裡的真實詞／片語，是的
+//! 話就依這個組合詞的詞頻加權，讓候選字排序更貼近上下文，而不是每個字
+//! 獨立地只看自己的詞頻。
 
 use crate::keyboard::TONE_MARKS;
 use std::collections::{HashMap, HashSet};
@@ -55,6 +65,8 @@ pub struct Dictionary {
     abbreviation_index: HashMap<String, Vec<Entry>>,
     /// 拿掉每個音節聲調後的字串 -> 候選字（見模組說明「不分聲調選字」）。
     toneless_index: HashMap<String, Vec<Entry>>,
+    /// 文字 -> 該文字所有讀音中最高的詞頻（見模組說明「詞頻反查」）。
+    word_frequencies: HashMap<String, u32>,
 }
 
 impl Dictionary {
@@ -74,6 +86,7 @@ impl Dictionary {
         let mut valid_prefixes: HashSet<String> = HashSet::new();
         let mut abbreviation_index: HashMap<String, Vec<Entry>> = HashMap::new();
         let mut toneless_index: HashMap<String, Vec<Entry>> = HashMap::new();
+        let mut word_frequencies: HashMap<String, u32> = HashMap::new();
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -106,6 +119,11 @@ impl Dictionary {
                 toneless_parts.push(strip_tone(syllable));
             }
 
+            word_frequencies
+                .entry(word.to_string())
+                .and_modify(|best| *best = (*best).max(frequency))
+                .or_insert(frequency);
+
             let entry = Entry {
                 word: word.to_string(),
                 frequency,
@@ -127,6 +145,7 @@ impl Dictionary {
             valid_prefixes,
             abbreviation_index,
             toneless_index,
+            word_frequencies,
         }
     }
 
@@ -164,6 +183,12 @@ impl Dictionary {
             .get(base)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    /// 依文字（不是注音）反查詞頻，找不到時回傳 0（見模組說明「詞頻
+    /// 反查」）。同一個文字有多筆讀音時，回傳其中最高的詞頻。
+    pub fn word_frequency(&self, word: &str) -> u32 {
+        self.word_frequencies.get(word).copied().unwrap_or(0)
     }
 
     /// 詞庫中的候選字（詞）總數。
@@ -340,5 +365,24 @@ mod tests {
     fn toneless_lookup_with_no_match_returns_empty_slice() {
         let dict = Dictionary::parse("ㄊㄞˊ\t台\t3000\n");
         assert!(dict.lookup_toneless("ㄏㄠ").is_empty());
+    }
+
+    #[test]
+    fn word_frequency_finds_a_known_word() {
+        let dict = Dictionary::parse("ㄋㄧˇ ㄏㄠˇ\t你好\t1227\n");
+        assert_eq!(dict.word_frequency("你好"), 1227);
+    }
+
+    #[test]
+    fn word_frequency_of_an_unknown_word_is_zero() {
+        let dict = Dictionary::parse("ㄋㄧˇ ㄏㄠˇ\t你好\t1227\n");
+        assert_eq!(dict.word_frequency("再見"), 0);
+    }
+
+    #[test]
+    fn word_frequency_picks_the_highest_across_multiple_readings_of_the_same_word() {
+        // 同一個字有兩種讀音時（不同破音字義），取最高的詞頻。
+        let dict = Dictionary::parse("ㄒㄧㄥˊ\t行\t3000\nㄏㄤˊ\t行\t8000\n");
+        assert_eq!(dict.word_frequency("行"), 8000);
     }
 }

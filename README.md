@@ -11,7 +11,7 @@
 
 ```
 core/           Rust library，注音轉換核心引擎，純邏輯、可獨立測試
-  keyboard.rs   注音鍵盤佈局定義（目前實作大千式）
+  keyboard.rs   注音鍵盤佈局定義（大千式、倚天式；見下方「鍵盤佈局」）
   syllable.rs   單一音節的狀態機
   dictionary.rs 詞庫查詢；也維護多音節詞的「合法前綴」索引、縮寫索引、
                 不分聲調索引
@@ -42,10 +42,24 @@ docs/
 
 目前進度：
 
-- **Phase 1（核心轉換引擎）**：鍵盤佈局、音節組合驗證、詞庫查詢、基本詞頻
-  排序皆已可獨立建置與測試；詞庫已改用轉換自 libchewing-data 的正式詞庫
-  （`data/chewing-characters.txt`，單字與多字詞共約 16 萬筆，附真實詞
-  頻），不再只是十幾筆的範例資料。
+- **Phase 1（核心轉換引擎）：完成**。鍵盤佈局、音節組合驗證、詞庫查詢、
+  基本 bigram 詞頻排序皆已可獨立建置與測試；詞庫已改用轉換自
+  libchewing-data 的正式詞庫（`data/chewing-characters.txt`，單字與多字詞
+  共約 16 萬筆，附真實詞頻），不再只是十幾筆的範例資料。企劃書原本列的
+  IBM／精業／許氏鍵盤佈局，因為實務上很少人用，先不實作（只做大千式與
+  倚天式這兩種最常用的）。
+  **鍵盤佈局**：預設大千式（Windows 內建標準），可透過
+  `Engine::set_layout`／`zuyin-backend` 第三個命令列參數（`standard`／
+  `eten`）切換成倚天式；兩份鍵位表都對照過
+  [libchewing](https://github.com/chewing/libchewing) 的權威實作核對過
+  （見 `core/src/keyboard.rs`）——過程中也發現並修正了大千式 `h`／`b`
+  兩個鍵先前寫反的問題（`h` 應該是 ㄘ、`b` 應該是 ㄖ）。
+  **基本 bigram 詞頻排序**：候選字排序除了詞頻與個人選字記憶，也會看
+  「上一個送出的字」＋這個候選字兩字連起來是不是詞庫裡的真實詞，是的話
+  用那個詞的真實語料詞頻加權，讓排序多少反映上下文——例如剛送出「我」
+  以後，同音字裡跟「我」常常組成詞的字會被排到前面（見 `core/src/lib.rs`
+  模組文件「基本 bigram 詞頻排序」）。直接重用詞庫本來就有的片語詞頻
+  資料當訊號，沒有另外收集或訓練語言模型，是刻意做得很「基本」的版本。
   **多字詞（片語）組字**：`core::Engine` 支援連續打好幾個音節，採用
   「貪婪最長匹配」——只要目前累積的音節序列還可能湊成詞庫裡更長的詞，
   就持續累積、即時顯示最長的可能詞當候選字；一旦再打下一個音節就湊不出
@@ -105,6 +119,9 @@ cargo run -p zuyin-backend -- data/dict.txt
 # 想順便試用自訂詞範例（見 data/user_phrases.example.txt）：
 cp data/user_phrases.example.txt user_phrases.txt
 cargo run -p zuyin-backend -- data/chewing-characters.txt user_phrases.txt
+
+# 想改用倚天式鍵盤佈局（第三個參數，預設 standard；見上方「鍵盤佈局」）：
+cargo run -p zuyin-backend -- data/chewing-characters.txt user_phrases.txt eten
 
 # 重新產生 data/chewing-characters.txt（來源與授權見
 # docs/THIRD_PARTY_NOTICES.md）：
@@ -214,3 +231,17 @@ PIME_MSG|c1|{"success":true,"seqNum":15,"return":true,"compositionString":"ㄉ",
 
 選這個候選字就會把整段地址當作 `commitString` 送出，直接貼進瀏覽器
 表單或文件裡的輸入欄位。
+
+基本 bigram 詞頻排序會依「上一個送出的字」調整候選字順序：送出「我」
+以後打 ㄇㄣˊ，「們」（跟「我」常組成「我們」）會被排到比基礎詞頻更高
+的「門」前面：
+
+```text
+c1|{"method":"onKeyDown","seqNum":16,"charCode":97,"keyCode":65,"keyStates":[]}
+c1|{"method":"onKeyDown","seqNum":17,"charCode":112,"keyCode":80,"keyStates":[]}
+c1|{"method":"onKeyDown","seqNum":18,"charCode":54,"keyCode":54,"keyStates":[]}
+
+PIME_MSG|c1|{"success":true,"seqNum":16,"return":true,"compositionString":"ㄇ","candidateList":["ㄇ"],"showCandidates":true}
+PIME_MSG|c1|{"success":true,"seqNum":17,"return":true,"compositionString":"ㄇㄣ","candidateList":["悶","燜","們","門","...","..."],"showCandidates":true}
+PIME_MSG|c1|{"success":true,"seqNum":18,"return":true,"compositionString":"ㄇㄣˊ","candidateList":["們","門","穈","捫","...","..."],"showCandidates":true}
+```

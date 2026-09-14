@@ -50,6 +50,13 @@
 //! 只在「目前正在輸入的音節」還沒打聲調時觸發；一旦打了聲調，就只會用
 //! 一般的精確比對，不會再混入其他聲調的候選字。
 //!
+//! 這代表候選字視窗可能在使用者打完聲調「之前」就已經開啟——平台整合層
+//! 如果單純以「候選字視窗已開啟」判斷數字鍵一律是選字鍵（常見的候選字
+//! UI 慣例），會不小心把接下來要打的聲調數字鍵也吃掉。
+//! [`Engine::extends_current_syllable`] 就是設計來讓平台整合層在這種
+//! 情況下優先判斷「這個鍵還能不能繼續組字」，見該方法文件；
+//! `backend::Session::classify` 已經套用這個判斷。
+//!
 //! ## 使用者自訂詞（快速填寫）
 //!
 //! 除了詞庫本身，引擎也可以掛上一份 [`user_phrases::UserPhrases`]（見該
@@ -58,6 +65,29 @@
 //! 詞永遠優先於詞庫本身與縮寫／不分聲調的猜測結果（見
 //! [`Engine::refresh_candidates`] 的合併順序），因為那是使用者自己明確
 //! 設定的捷徑，不是引擎的猜測。
+//!
+//! ## 鍵盤佈局
+//!
+//! `Engine` 預設用大千式（[`keyboard::StandardLayout`]），可用
+//! [`Engine::set_layout`] 切換成倚天式（[`keyboard::EtenLayout`]），見
+//! [`keyboard::KeyboardLayout`]。
+//!
+//! ## 基本 bigram 詞頻排序
+//!
+//! 排序候選字時，除了詞庫詞頻與使用者個人選字記憶，還會額外看「上一個
+//! 送到應用程式的字（`last_committed`）＋這個候選字」兩個字連起來是否
+//! 剛好是詞庫裡的一個真實詞（[`dictionary::Dictionary::word_frequency`]
+//! 反查），是的話用那個詞的真實語料詞頻當加權，讓候選字排序多少能反映
+//! 上下文，而不是每個字獨立地只看自己的詞頻——例如剛送出「我」以後，
+//! 同音字裡跟「我」常常連在一起組成詞的字會被排到前面。這是刻意做得很
+//! 「基本」的版本：直接重用詞庫本來就有的片語詞頻資料當 bigram 訊號，
+//! 沒有另外收集或訓練語言模型（見 `docs/PROJECT_PLAN.md` Phase 1
+//! 「基本 bigram/trigram 詞頻排序」）。`last_committed` 由
+//! [`Engine::select_candidate`] 與貪婪最長匹配自動送出的文字更新，
+//! [`Engine::reset_context`] 可以手動清空（例如切換應用程式、輸入框失焦
+//! 時，見 `backend` 的 `Session::reset_composition`）；`backspace`／
+//! `clear` 不會影響它，因為那些操作是在修改「還沒送出」的內容，不代表
+//! 上一個已經送出的字改變了。
 
 pub mod dictionary;
 pub mod keyboard;
@@ -66,9 +96,10 @@ pub mod syllable;
 pub mod user_phrases;
 
 pub use dictionary::{Dictionary, Entry};
+pub use keyboard::KeyboardLayout;
 pub use user_phrases::UserPhrases;
 
-use keyboard::{StandardLayout, ZhuyinSymbol};
+use keyboard::ZhuyinSymbol;
 use ranking::Ranker;
 use std::io;
 use syllable::{PushResult, Syllable};
@@ -94,7 +125,7 @@ pub enum KeyOutcome {
 
 /// 注音輸入法核心引擎：組合鍵盤佈局、音節狀態機、詞庫與排序模型。
 pub struct Engine {
-    layout: StandardLayout,
+    layout: KeyboardLayout,
     /// 已確認屬於目前多音節序列、但尚未送出的音節（見模組文件）。
     committed: Vec<Syllable>,
     /// 正在輸入中的音節。
@@ -103,18 +134,33 @@ pub struct Engine {
     /// 使用者自訂詞（見模組文件「使用者自訂詞」），預設空。
     user_phrases: UserPhrases,
     ranker: Ranker,
+    /// 上一個送到應用程式的字（見模組文件「基本 bigram 詞頻排序」）。
+    last_committed: Option<String>,
 }
 
 impl Engine {
     pub fn new(dictionary: Dictionary) -> Self {
         Self {
-            layout: StandardLayout,
+            layout: KeyboardLayout::default(),
             committed: Vec::new(),
             current: Syllable::new(),
             dictionary,
             user_phrases: UserPhrases::new(),
             ranker: Ranker::new(),
+            last_committed: None,
         }
+    }
+
+    /// 切換鍵盤佈局（見模組文件「鍵盤佈局」）。
+    pub fn set_layout(&mut self, layout: KeyboardLayout) {
+        self.layout = layout;
+    }
+
+    /// 清空「上一個送出的字」這個 bigram 排序用的上下文（見模組文件
+    /// 「基本 bigram 詞頻排序」）。適合在應用程式切換、輸入框失焦等
+    /// 「接下來打的字跟前面已經送出的字其實沒有語意關聯」的時機呼叫。
+    pub fn reset_context(&mut self) {
+        self.last_committed = None;
     }
 
     /// 掛上一份使用者自訂詞庫，取代目前這份（見模組文件「使用者自訂
@@ -150,6 +196,23 @@ impl Engine {
         self.layout.lookup(key).is_some()
     }
 
+    /// 這個按鍵送進 [`Engine::key_press`] 會不會單純疊加進「正在輸入中
+    /// 的音節」（而不是觸發音節邊界，或者根本不是注音鍵）。
+    ///
+    /// 用於呼叫端（例如平台整合層）在候選字視窗已經開啟時，判斷某個
+    /// 按鍵該優先當成「繼續組字」還是「選字」——尤其是「不分聲調選字」
+    /// （見模組文件）可能讓候選字視窗在使用者打完聲調之前就已經開啟，
+    /// 若這時完全依賴「候選字視窗開啟中」來判斷數字鍵一律是選字鍵，會
+    /// 誤吃掉原本該接續輸入的聲調數字鍵。只要這個鍵對應的類別（聲母／
+    /// 介母／韻母／聲調）在目前音節裡還是空的，就回傳 `true`，呼叫端
+    /// 應該優先讓它繼續組字。
+    pub fn extends_current_syllable(&self, key: char) -> bool {
+        match self.layout.lookup(key) {
+            Some(symbol) => !self.current.has(symbol.kind),
+            None => false,
+        }
+    }
+
     /// 處理一個按鍵事件。
     pub fn key_press(&mut self, key: char) -> KeyOutcome {
         let Some(symbol) = self.layout.lookup(key) else {
@@ -162,6 +225,11 @@ impl Engine {
         } else {
             Vec::new()
         };
+        if let Some(last) = flushed.last() {
+            // 貪婪最長匹配自動送出的文字，也是真的送到應用程式的字，
+            // 該當作接下來 bigram 排序的上下文（見模組文件）。
+            self.last_committed = Some(last.clone());
+        }
 
         self.refresh_candidates(flushed)
     }
@@ -195,6 +263,7 @@ impl Engine {
         let key = self.full_key();
         self.ranker.record_selection(&key, word);
         self.clear();
+        self.last_committed = Some(word.to_string());
         word.to_string()
     }
 
@@ -264,6 +333,10 @@ impl Engine {
     /// 四種來源一律用 `key`（[`Engine::full_key`]）當排序記憶鍵，因為
     /// [`Engine::select_candidate`] 一律以它記錄使用者選字記憶——不論候選
     /// 字最終是從哪個來源找到的，都要共用同一份個人化排序記憶才有意義。
+    /// 每個來源內部也都會依「基本 bigram 詞頻排序」（見模組文件）做次要
+    /// 排序，但不會打亂來源之間的優先順序（例如使用者自訂詞就算沒有
+    /// bigram 加權，也一定排在詞庫候選字之前——這是 call 的先後順序保證
+    /// 的，跟每個來源內部怎麼排無關）。
     fn refresh_candidates(&self, flushed: Vec<String>) -> KeyOutcome {
         let buffer = self.display_buffer();
         let key = self.full_key();
@@ -295,16 +368,30 @@ impl Engine {
         }
     }
 
-    /// 依 `rank_key` 排序 `entries`，把還沒出現過（依詞比對）的候選字
-    /// 依序附加到 `candidates` 尾端。
+    /// 依 `rank_key` 排序 `entries`（詞頻＋使用者記憶），再依「跟上一個
+    /// 送出的字連起來是否為真實詞」（見模組文件「基本 bigram 詞頻排序」）
+    /// 做一次穩定的次要排序，最後把還沒出現過（依詞比對）的候選字依序
+    /// 附加到 `candidates` 尾端。
     fn merge_ranked(&self, rank_key: &str, entries: &[Entry], candidates: &mut Vec<Entry>) {
-        for candidate in self.ranker.rank(rank_key, entries) {
+        let mut ranked = self.ranker.rank(rank_key, entries);
+        ranked.sort_by_key(|entry| std::cmp::Reverse(self.bigram_boost(&entry.word)));
+        for candidate in ranked {
             if !candidates
                 .iter()
                 .any(|existing| existing.word == candidate.word)
             {
                 candidates.push(candidate.clone());
             }
+        }
+    }
+
+    /// `word` 接在「上一個送出的字」後面是否剛好是詞庫裡的真實詞，是的
+    /// 話回傳那個詞的真實語料詞頻，否則回傳 0（見模組文件「基本 bigram
+    /// 詞頻排序」）。
+    fn bigram_boost(&self, word: &str) -> u32 {
+        match &self.last_committed {
+            Some(prev) => self.dictionary.word_frequency(&format!("{prev}{word}")),
+            None => 0,
         }
     }
 
@@ -820,6 +907,40 @@ mod tests {
         assert_eq!(engine.toneless_key(), None);
     }
 
+    #[test]
+    fn extends_current_syllable_is_true_for_an_empty_slot() {
+        let mut engine = Engine::new(toneless_dictionary());
+        // 台 = ㄊㄞˊ : w(ㄊ) 9(ㄞ)，還沒打聲調。
+        engine.key_press('w');
+        engine.key_press('9');
+        assert!(
+            engine.extends_current_syllable('6'), // 6 = 聲調 ˊ，目前是空的
+            "聲調槽位還空著，聲調鍵應該視為繼續組字"
+        );
+    }
+
+    #[test]
+    fn extends_current_syllable_is_false_once_the_slot_is_filled() {
+        let mut engine = Engine::new(toneless_dictionary());
+        engine.key_press('w');
+        engine.key_press('9');
+        engine.key_press('6'); // 補上聲調，ㄊㄞˊ 已完整
+        assert!(
+            !engine.extends_current_syllable('6'),
+            "聲調槽位已經填過，同一個聲調鍵不該再被當成繼續組字"
+        );
+        assert!(
+            !engine.extends_current_syllable('w'), // w = 聲母 ㄊ，聲母槽位也已填過
+            "聲母槽位已經填過，不該被當成繼續組字"
+        );
+    }
+
+    #[test]
+    fn extends_current_syllable_is_false_for_a_non_zhuyin_key() {
+        let engine = Engine::new(toneless_dictionary());
+        assert!(!engine.extends_current_syllable('!'));
+    }
+
     // 使用者自訂詞的注音碼可以是任何打得出來的音節字串，不必對應真實
     // 讀音——底下範例統一用 z(ㄈ) 這個單一聲母當捷徑代碼，打一個鍵就
     // 能叫出候選字（單一聲母就已經 `is_ready()`，不必等第二個音節）。
@@ -889,6 +1010,74 @@ mod tests {
                 word: "新地址".into(),
                 frequency: user_phrases::USER_PHRASE_FREQUENCY
             }]
+        );
+    }
+
+    /// 「我」+「是」是詞庫裡的真實詞（較高詞頻），「我」+「市」不是；
+    /// 「市」的基礎詞頻故意設得比「是」高，用來驗證 bigram 加權真的會
+    /// 蓋過純詞頻排序，而不是恰好詞頻本來就比較高。
+    fn bigram_dictionary() -> Dictionary {
+        Dictionary::parse(
+            "ㄨㄛˇ\t我\t9000\n\
+             ㄕˋ\t市\t9000\n\
+             ㄕˋ\t是\t100\n\
+             ㄨㄛˇ ㄕˋ\t我是\t5000\n",
+        )
+    }
+
+    #[test]
+    fn bigram_context_reorders_candidates_toward_the_word_that_commonly_follows() {
+        let mut engine = Engine::new(bigram_dictionary());
+
+        // 我 = ㄨㄛˇ : h(ㄨ)... 用鍵盤查：ㄨ 在 'j'，ㄛ 在 'i'，ˇ 在 '3'。
+        engine.key_press('j');
+        engine.key_press('i');
+        engine.key_press('3');
+        let committed = engine.select_candidate("我");
+        assert_eq!(committed, "我");
+
+        // 是 = ㄕˋ : g(ㄕ) 4(ˋ)
+        engine.key_press('g');
+        let outcome = engine.key_press('4');
+        let KeyOutcome::Composing { candidates, .. } = outcome else {
+            panic!("expected Composing outcome");
+        };
+        assert_eq!(
+            candidates[0].word, "是",
+            "「我」後面接「是」有真實的『我是』片語，該蓋過「市」較高的基礎詞頻"
+        );
+    }
+
+    #[test]
+    fn bigram_context_does_not_apply_without_a_prior_committed_word() {
+        let mut engine = Engine::new(bigram_dictionary());
+
+        // 沒有先送出任何字，直接打「是」：應該退回純詞頻排序，「市」在前。
+        engine.key_press('g');
+        let outcome = engine.key_press('4');
+        let KeyOutcome::Composing { candidates, .. } = outcome else {
+            panic!("expected Composing outcome");
+        };
+        assert_eq!(candidates[0].word, "市");
+    }
+
+    #[test]
+    fn reset_context_clears_the_bigram_context() {
+        let mut engine = Engine::new(bigram_dictionary());
+        engine.key_press('j');
+        engine.key_press('i');
+        engine.key_press('3');
+        engine.select_candidate("我");
+        engine.reset_context();
+
+        engine.key_press('g');
+        let outcome = engine.key_press('4');
+        let KeyOutcome::Composing { candidates, .. } = outcome else {
+            panic!("expected Composing outcome");
+        };
+        assert_eq!(
+            candidates[0].word, "市",
+            "reset_context 後應該退回純詞頻排序"
         );
     }
 

@@ -1,8 +1,11 @@
 //! 注音鍵盤佈局定義。
 //!
-//! 目前僅實作「大千式」（Windows 內建標準注音鍵盤）佈局。其餘佈局
-//! （倚天／IBM／精業／許氏）留待後續依需求擴充，詳見 `docs/PROJECT_PLAN.md`
-//! Phase 1 規劃。
+//! 實作 Windows 上兩種最常用的注音鍵盤佈局：[`StandardLayout`]（大千式，
+//! 各平台預設值）與 [`EtenLayout`]（倚天式）。IBM／精業／許氏配置實務上
+//! 較少人用，先不實作（見 `docs/PROJECT_PLAN.md` Phase 1 規劃）。兩份鍵位
+//! 對照表都是照抄 [libchewing](https://github.com/chewing/libchewing) 的
+//! 權威實作核對過的（`src/editor/zhuyin_layout/standard.rs` 與
+//! `.../et.rs`），不是憑印象自己排的。
 
 use std::fmt;
 
@@ -48,8 +51,33 @@ macro_rules! symbol {
 /// [`crate::dictionary::Dictionary::lookup_toneless`]）。
 pub const TONE_MARKS: [char; 4] = ['ˊ', 'ˇ', 'ˋ', '˙'];
 
+/// 使用者可選擇的注音鍵盤佈局（見模組文件）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardLayout {
+    /// 大千式，各平台預設值。
+    Standard(StandardLayout),
+    /// 倚天式。
+    Eten(EtenLayout),
+}
+
+impl Default for KeyboardLayout {
+    fn default() -> Self {
+        KeyboardLayout::Standard(StandardLayout)
+    }
+}
+
+impl KeyboardLayout {
+    /// 查詢按鍵對應的注音符號；非注音鍵回傳 `None`。
+    pub fn lookup(&self, key: char) -> Option<ZhuyinSymbol> {
+        match self {
+            KeyboardLayout::Standard(layout) => layout.lookup(key),
+            KeyboardLayout::Eten(layout) => layout.lookup(key),
+        }
+    }
+}
+
 /// 大千式（Windows 內建標準）注音鍵盤佈局：將 QWERTY 按鍵對應到注音符號。
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StandardLayout;
 
 impl StandardLayout {
@@ -85,7 +113,7 @@ impl StandardLayout {
             'd' => symbol!(Initial, 'ㄎ'),
             'f' => symbol!(Initial, 'ㄑ'),
             'g' => symbol!(Initial, 'ㄕ'),
-            'h' => symbol!(Initial, 'ㄖ'),
+            'h' => symbol!(Initial, 'ㄘ'),
             'j' => symbol!(Medial, 'ㄨ'),
             'k' => symbol!(Final, 'ㄜ'),
             'l' => symbol!(Final, 'ㄠ'),
@@ -95,12 +123,73 @@ impl StandardLayout {
             'x' => symbol!(Initial, 'ㄌ'),
             'c' => symbol!(Initial, 'ㄏ'),
             'v' => symbol!(Initial, 'ㄒ'),
-            'b' => symbol!(Initial, 'ㄘ'),
+            'b' => symbol!(Initial, 'ㄖ'),
             'n' => symbol!(Initial, 'ㄙ'),
             'm' => symbol!(Medial, 'ㄩ'),
             ',' => symbol!(Final, 'ㄝ'),
             '.' => symbol!(Final, 'ㄡ'),
             '/' => symbol!(Final, 'ㄥ'),
+
+            _ => return None,
+        })
+    }
+}
+
+/// 倚天式（ET41）注音鍵盤佈局：另一種在 Windows 上常見的鍵盤佈局，跟
+/// 大千式鍵位完全不同（見模組文件）。跟大千式不同，倚天式用到了 `=` 跟
+/// `'`（單引號）這兩個大千式沒用到的鍵位。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EtenLayout;
+
+impl EtenLayout {
+    /// 查詢按鍵對應的注音符號；非注音鍵回傳 `None`。
+    pub fn lookup(&self, key: char) -> Option<ZhuyinSymbol> {
+        let key = key.to_ascii_lowercase();
+        Some(match key {
+            '1' => symbol!(Tone, '˙'),
+            '2' => symbol!(Tone, 'ˊ'),
+            '3' => symbol!(Tone, 'ˇ'),
+            '4' => symbol!(Tone, 'ˋ'),
+            '7' => symbol!(Initial, 'ㄑ'),
+            '8' => symbol!(Final, 'ㄢ'),
+            '9' => symbol!(Final, 'ㄣ'),
+            '0' => symbol!(Final, 'ㄤ'),
+            '-' => symbol!(Final, 'ㄥ'),
+            '=' => symbol!(Final, 'ㄦ'),
+
+            'q' => symbol!(Final, 'ㄟ'),
+            'w' => symbol!(Final, 'ㄝ'),
+            'e' => symbol!(Medial, 'ㄧ'),
+            'r' => symbol!(Final, 'ㄜ'),
+            't' => symbol!(Initial, 'ㄊ'),
+            'y' => symbol!(Final, 'ㄡ'),
+            'u' => symbol!(Medial, 'ㄩ'),
+            'i' => symbol!(Final, 'ㄞ'),
+            'o' => symbol!(Final, 'ㄛ'),
+            'p' => symbol!(Initial, 'ㄆ'),
+
+            'a' => symbol!(Final, 'ㄚ'),
+            's' => symbol!(Initial, 'ㄙ'),
+            'd' => symbol!(Initial, 'ㄉ'),
+            'f' => symbol!(Initial, 'ㄈ'),
+            'g' => symbol!(Initial, 'ㄐ'),
+            'h' => symbol!(Initial, 'ㄏ'),
+            'j' => symbol!(Initial, 'ㄖ'),
+            'k' => symbol!(Initial, 'ㄎ'),
+            'l' => symbol!(Initial, 'ㄌ'),
+            ';' => symbol!(Initial, 'ㄗ'),
+            '\'' => symbol!(Initial, 'ㄘ'),
+
+            'z' => symbol!(Final, 'ㄠ'),
+            'x' => symbol!(Medial, 'ㄨ'),
+            'c' => symbol!(Initial, 'ㄒ'),
+            'v' => symbol!(Initial, 'ㄍ'),
+            'b' => symbol!(Initial, 'ㄅ'),
+            'n' => symbol!(Initial, 'ㄋ'),
+            'm' => symbol!(Initial, 'ㄇ'),
+            ',' => symbol!(Initial, 'ㄓ'),
+            '.' => symbol!(Initial, 'ㄔ'),
+            '/' => symbol!(Initial, 'ㄕ'),
 
             _ => return None,
         })
@@ -143,5 +232,47 @@ mod tests {
         assert_eq!(layout.lookup('s').unwrap().kind, SymbolKind::Initial);
         assert_eq!(layout.lookup('u').unwrap().kind, SymbolKind::Medial);
         assert_eq!(layout.lookup('3').unwrap().kind, SymbolKind::Tone);
+    }
+
+    #[test]
+    fn h_and_b_match_the_real_dai_chien_layout() {
+        // 這兩個鍵先前寫反了（h 誤植成 ㄖ、b 誤植成 ㄘ）；對照
+        // libchewing `src/editor/zhuyin_layout/standard.rs` 權威實作
+        // 修正回來：h 是 ㄘ、b 是 ㄖ。
+        let layout = StandardLayout;
+        assert_eq!(layout.lookup('h').unwrap().glyph, 'ㄘ');
+        assert_eq!(layout.lookup('b').unwrap().glyph, 'ㄖ');
+    }
+
+    #[test]
+    fn eten_layout_maps_all_37_zhuyin_letters_and_4_tone_marks() {
+        let layout = EtenLayout;
+        let mapped: std::collections::HashSet<char> = "1234567890-=qwertyuiopasdfghjkl;'zxcvbnm,./"
+            .chars()
+            .filter_map(|k| layout.lookup(k))
+            .map(|s| s.glyph)
+            .collect();
+        assert_eq!(mapped.len(), 41, "37 注音字母 + 4 聲調符號 = 41");
+    }
+
+    #[test]
+    fn eten_known_mappings() {
+        // 對照 libchewing `src/editor/zhuyin_layout/et.rs` 權威實作。
+        let layout = EtenLayout;
+        assert_eq!(layout.lookup('b').unwrap().glyph, 'ㄅ'); // 大千式是 q
+        assert_eq!(layout.lookup('e').unwrap().glyph, 'ㄧ'); // 大千式是 u
+        assert_eq!(layout.lookup('e').unwrap().kind, SymbolKind::Medial);
+        assert_eq!(layout.lookup('1').unwrap().glyph, '˙'); // 大千式是 7
+        assert_eq!(layout.lookup('\'').unwrap().glyph, 'ㄘ');
+        assert_eq!(layout.lookup('=').unwrap().glyph, 'ㄦ'); // 大千式是 -
+    }
+
+    #[test]
+    fn keyboard_layout_enum_dispatches_to_the_selected_layout() {
+        let standard = KeyboardLayout::Standard(StandardLayout);
+        let eten = KeyboardLayout::Eten(EtenLayout);
+        assert_eq!(standard.lookup('s').unwrap().glyph, 'ㄋ');
+        assert_eq!(eten.lookup('s').unwrap().glyph, 'ㄙ');
+        assert_eq!(KeyboardLayout::default(), standard, "預設應該是大千式");
     }
 }

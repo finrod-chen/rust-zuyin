@@ -20,12 +20,21 @@ use session::{
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
-use zuyin_core::{Dictionary, UserPhrases};
+use zuyin_core::keyboard::{EtenLayout, StandardLayout};
+use zuyin_core::{Dictionary, KeyboardLayout, UserPhrases};
 
 /// 使用者自訂詞庫的預設路徑（見 `zuyin_core::user_phrases` 模組文件）。
 /// 刻意放在 repo 根目錄、不放進 `data/`：裡面可能是使用者自己的地址、
 /// 姓名、電話等個人資料，不該被打包進版本控制（見 `.gitignore`）。
 const DEFAULT_USER_PHRASES_PATH: &str = "user_phrases.txt";
+
+/// 啟動時載入好、之後每個新 client session 都要套用的設定（見
+/// `dispatch` 的 `Request::Init` 分支）。
+struct Config<'a> {
+    dictionary: &'a Dictionary,
+    user_phrases: &'a UserPhrases,
+    layout: KeyboardLayout,
+}
 
 fn main() -> io::Result<()> {
     let mut args = env::args().skip(1);
@@ -35,6 +44,10 @@ fn main() -> io::Result<()> {
     let user_phrases_path = args
         .next()
         .unwrap_or_else(|| DEFAULT_USER_PHRASES_PATH.to_string());
+    let layout = args
+        .next()
+        .map(|arg| parse_layout(&arg))
+        .unwrap_or_default();
 
     let dictionary = Dictionary::load_file(&dict_path).unwrap_or_else(|err| {
         eprintln!("警告：無法載入詞庫 {dict_path}（{err}），將以空詞庫啟動");
@@ -45,30 +58,47 @@ fn main() -> io::Result<()> {
         UserPhrases::new()
     });
     eprintln!(
-        "zuyin-backend 已啟動，詞庫載入 {} 筆候選字，使用者自訂詞 {} 筆",
+        "zuyin-backend 已啟動，詞庫載入 {} 筆候選字，使用者自訂詞 {} 筆，鍵盤佈局：{}",
         dictionary.len(),
-        user_phrases.len()
+        user_phrases.len(),
+        layout_name(layout),
     );
 
+    let config = Config {
+        dictionary: &dictionary,
+        user_phrases: &user_phrases,
+        layout,
+    };
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    run(
-        BufReader::new(stdin.lock()),
-        &mut stdout,
-        &dictionary,
-        &user_phrases,
-    )
+    run(BufReader::new(stdin.lock()), &mut stdout, &config)
+}
+
+/// 解析第三個命令列參數指定的鍵盤佈局（`standard`／`eten`，不分大小寫；
+/// 見 `zuyin_core::keyboard` 模組文件）。無法辨識時警告並退回預設的
+/// 大千式，不視為致命錯誤。
+fn parse_layout(arg: &str) -> KeyboardLayout {
+    match arg.to_ascii_lowercase().as_str() {
+        "standard" | "dachien" | "大千" => KeyboardLayout::Standard(StandardLayout),
+        "eten" | "et" | "倚天" => KeyboardLayout::Eten(EtenLayout),
+        other => {
+            eprintln!("警告：不認得的鍵盤佈局 \"{other}\"，將使用預設的大千式");
+            KeyboardLayout::default()
+        }
+    }
+}
+
+fn layout_name(layout: KeyboardLayout) -> &'static str {
+    match layout {
+        KeyboardLayout::Standard(_) => "大千式",
+        KeyboardLayout::Eten(_) => "倚天式",
+    }
 }
 
 /// 逐行讀取 `"<client_id>|<json>"` 請求、寫出 `"PIME_MSG|<client_id>|<json>"`
 /// 回應。任何一行處理失敗都不能讓迴圈中斷（見 `docs/PIME_PROTOCOL.md`
 /// 錯誤處理原則），因此每一步都盡量把失敗轉成回應而非提前回傳 `Err`。
-fn run(
-    input: impl BufRead,
-    output: &mut impl Write,
-    dictionary: &Dictionary,
-    user_phrases: &UserPhrases,
-) -> io::Result<()> {
+fn run(input: impl BufRead, output: &mut impl Write, config: &Config) -> io::Result<()> {
     let mut sessions: HashMap<String, Session> = HashMap::new();
     for line in input.lines() {
         let line = line?;
@@ -87,7 +117,7 @@ fn run(
                 eprintln!("client disconnected: {client_id}");
             }
             Ok(parsed) => {
-                let reply = dispatch(&mut sessions, client_id, dictionary, user_phrases, parsed);
+                let reply = dispatch(&mut sessions, client_id, config, parsed);
                 output.write_all(protocol::format_response(client_id, &reply).as_bytes())?;
                 output.flush()?;
             }
@@ -106,8 +136,7 @@ fn run(
 fn dispatch(
     sessions: &mut HashMap<String, Session>,
     client_id: &str,
-    dictionary: &Dictionary,
-    user_phrases: &UserPhrases,
+    config: &Config,
     parsed: ParsedRequest,
 ) -> Reply {
     let ParsedRequest { seq_num, request } = parsed;
@@ -115,8 +144,9 @@ fn dispatch(
         Some(session) => handle_initialized(session, seq_num, request),
         None => match request {
             Request::Init => {
-                let mut session = Session::new(dictionary.clone());
-                session.set_user_phrases(user_phrases.clone());
+                let mut session = Session::new(config.dictionary.clone());
+                session.set_user_phrases(config.user_phrases.clone());
+                session.set_layout(config.layout);
                 sessions.insert(client_id.to_string(), session);
                 Reply {
                     success: true,
@@ -357,15 +387,15 @@ mod tests {
     }
 
     fn run_lines(dictionary: &Dictionary, lines: &[&str]) -> Vec<String> {
+        let user_phrases = UserPhrases::new();
+        let config = Config {
+            dictionary,
+            user_phrases: &user_phrases,
+            layout: KeyboardLayout::default(),
+        };
         let input = lines.join("\n");
         let mut output = Vec::new();
-        run(
-            input.as_bytes(),
-            &mut output,
-            dictionary,
-            &UserPhrases::new(),
-        )
-        .unwrap();
+        run(input.as_bytes(), &mut output, &config).unwrap();
         String::from_utf8(output)
             .unwrap()
             .lines()
@@ -589,8 +619,13 @@ mod tests {
             ),
         ]
         .join("\n");
+        let config = Config {
+            dictionary: &dict,
+            user_phrases: &user_phrases,
+            layout: KeyboardLayout::default(),
+        };
         let mut output = Vec::new();
-        run(input.as_bytes(), &mut output, &dict, &user_phrases).unwrap();
+        run(input.as_bytes(), &mut output, &config).unwrap();
         let responses: Vec<String> = String::from_utf8(output)
             .unwrap()
             .lines()
@@ -601,6 +636,55 @@ mod tests {
         assert!(
             after_key.contains(r#""candidateList":["台北市大安區羅斯福路四段1號","分"]"#),
             "使用者自訂詞應排在詞庫候選字最前面: {after_key}"
+        );
+    }
+
+    #[test]
+    fn parse_layout_recognizes_both_supported_layouts_and_falls_back_to_standard() {
+        assert_eq!(
+            parse_layout("standard"),
+            KeyboardLayout::Standard(StandardLayout)
+        );
+        assert_eq!(parse_layout("ETEN"), KeyboardLayout::Eten(EtenLayout));
+        assert_eq!(
+            parse_layout("not-a-real-layout"),
+            KeyboardLayout::default(),
+            "無法辨識的佈局應該退回預設的大千式，而不是崩潰或忽略"
+        );
+    }
+
+    #[test]
+    fn eten_layout_is_used_when_selected() {
+        // 選了倚天式之後，鍵盤上同一個鍵應該對應到倚天式的符號，不是
+        // 大千式的——用 's' 這個鍵驗證：大千式是 ㄋ，倚天式是 ㄙ。
+        let dict = Dictionary::parse("ㄙ\t絲\t100\n");
+        let user_phrases = UserPhrases::new();
+        let config = Config {
+            dictionary: &dict,
+            user_phrases: &user_phrases,
+            layout: KeyboardLayout::Eten(EtenLayout),
+        };
+        let input = [
+            r#"c1|{"method":"init","seqNum":0,"id":"guid-1"}"#.to_string(),
+            r#"c1|{"method":"onActivate","seqNum":1,"isKeyboardOpen":true}"#.to_string(),
+            format!(
+                r#"c1|{{"method":"onKeyDown","seqNum":2,{}}}"#,
+                key_event('s' as u32, 0x53)
+            ),
+        ]
+        .join("\n");
+        let mut output = Vec::new();
+        run(input.as_bytes(), &mut output, &config).unwrap();
+        let responses: Vec<String> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+
+        let after_key = responses.last().unwrap();
+        assert!(
+            after_key.contains(r#""compositionString":"ㄙ""#),
+            "倚天式的 s 鍵應該是 ㄙ，不是大千式的 ㄋ: {after_key}"
         );
     }
 }

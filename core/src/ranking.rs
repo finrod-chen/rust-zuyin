@@ -24,6 +24,11 @@ impl Ranker {
         *self.memory.entry(key).or_insert(0) += SELECTION_BOOST;
     }
 
+    /// 清除所有已累積的使用者選字記憶，排序退回純依詞庫詞頻。
+    pub fn clear(&mut self) {
+        self.memory.clear();
+    }
+
     /// 依「詞庫詞頻 + 使用者記憶分數」由高到低排序候選字；
     /// 分數相同時保留詞庫原本的相對順序（stable sort）。
     pub fn rank<'a>(&self, zhuyin: &str, entries: &'a [Entry]) -> Vec<&'a Entry> {
@@ -86,6 +91,20 @@ mod tests {
     fn history_is_scoped_per_syllable() {
         let mut ranker = Ranker::new();
         ranker.record_selection("ㄏㄠˋ", "號"); // 不同音節（第四聲）的記憶不應影響此查詢
+        let entries = entries();
+        let ranked = ranker.rank("ㄏㄠˇ", &entries);
+        assert_eq!(
+            ranked.iter().map(|e| e.word.as_str()).collect::<Vec<_>>(),
+            vec!["好", "號"]
+        );
+    }
+
+    #[test]
+    fn clear_resets_ranking_to_base_frequency() {
+        let mut ranker = Ranker::new();
+        ranker.record_selection("ㄏㄠˇ", "號");
+        ranker.record_selection("ㄏㄠˇ", "號");
+        ranker.clear();
         let entries = entries();
         let ranked = ranker.rank("ㄏㄠˇ", &entries);
         assert_eq!(

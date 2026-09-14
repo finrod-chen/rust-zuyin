@@ -80,15 +80,26 @@ pub enum Request {
     OnKeyboardStatusChanged {
         opened: bool,
     },
-    /// 使用者點擊語言列按鈕。`id` 為我們用 `addButton` 註冊時給定的按鈕
-    /// 識別碼，PIMELauncher 會原樣送回。
+    /// 使用者點擊有 `commandId` 的語言列按鈕，或從 `onMenu` 選單挑了一個
+    /// 項目。`command_id` 是我們用 `addButton`／選單項目的 `id` 註冊的
+    /// 整數識別碼——**不是**按鈕本身的字串 `id`（見 `docs/PIME_PROTOCOL.md`
+    /// 「按鈕 id 與 commandId 的差異」）。
     OnCommand {
-        id: String,
+        command_id: i64,
         command_type: i64,
     },
-    /// 目前尚未實作行為的合法 method（例如 `onMenu`／`onPreservedKey`），
-    /// 或完全未知的 method；一律回 `success: false`，與官方
-    /// `TextService.handleRequest` 的 `else: success = False` 行為一致。
+    /// 使用者點擊 `type: "menu"` 的語言列按鈕。`button_id` 是該按鈕本身
+    /// 的字串 `id`（用來決定要回傳哪個選單）。
+    OnMenu {
+        button_id: String,
+    },
+    /// 使用者按下透過 `addPreservedKey` 註冊的全域保留鍵組合。
+    OnPreservedKey {
+        guid: String,
+    },
+    /// 目前尚未實作行為的合法 method，或完全未知的 method；一律回
+    /// `success: false`，與官方 `TextService.handleRequest` 的
+    /// `else: success = False` 行為一致。
     Unsupported,
     /// PIMELauncher 通知 client 已斷線，伺服器端應移除該 session、不回應。
     Close,
@@ -126,10 +137,22 @@ pub fn parse_request(json: &str) -> serde_json::Result<ParsedRequest> {
         "onKeyboardStatusChanged" => Request::OnKeyboardStatusChanged {
             opened: value.get("opened").and_then(Value::as_bool).unwrap_or(true),
         },
-        "onCommand" => match value.get("id").and_then(Value::as_str) {
-            Some(id) => Request::OnCommand {
-                id: id.to_string(),
+        "onCommand" => match value.get("id").and_then(Value::as_i64) {
+            Some(command_id) => Request::OnCommand {
+                command_id,
                 command_type: value.get("type").and_then(Value::as_i64).unwrap_or(0),
+            },
+            None => Request::Unsupported,
+        },
+        "onMenu" => match value.get("id").and_then(Value::as_str) {
+            Some(button_id) => Request::OnMenu {
+                button_id: button_id.to_string(),
+            },
+            None => Request::Unsupported,
+        },
+        "onPreservedKey" => match value.get("guid").and_then(Value::as_str) {
+            Some(guid) => Request::OnPreservedKey {
+                guid: guid.to_lowercase(),
             },
             None => Request::Unsupported,
         },
@@ -143,27 +166,86 @@ fn key_event(value: &Value) -> Option<KeyEventData> {
     serde_json::from_value(value.clone()).ok()
 }
 
-/// 語言列按鈕狀態，對應官方 `addButton`／`changeButton` 累積出的 dict
-/// （`{"id": ..., "toggled": ..., "text": ..., "tooltip": ..., "type": ...}`）。
+/// 語言列按鈕狀態，對應官方 `addButton`／`changeButton` 累積出的 dict。
+///
+/// 按鈕本身的 `id`（字串）與點擊後 `onCommand` 收到的識別碼是兩回事：
+/// 一般按鈕另外帶 `commandId`（整數），點擊時 `onCommand` 的 `id` 欄位
+/// 送回的是這個 `commandId`，不是按鈕的字串 `id`；`type: "menu"` 的按鈕則
+/// 不需要 `commandId`——點擊時觸發 `onMenu`，用按鈕自己的字串 `id` 決定
+/// 要顯示哪個選單（見 `docs/PIME_PROTOCOL.md`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ButtonState {
     pub id: String,
     pub text: String,
     pub tooltip: String,
     pub r#type: &'static str,
-    pub toggled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toggled: Option<bool>,
+}
+
+/// 語言列選單的一個項目，對應官方 `onMenu` 回傳的 JSON 結構：
+/// `{"text":..,"id":..}` 為一般項目、`{}` 為分隔線、
+/// `{"text":..,"submenu":[...]}` 為子選單，皆可選配 `"checked"`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MenuItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submenu: Option<Vec<MenuItem>>,
+}
+
+impl MenuItem {
+    pub fn separator() -> Self {
+        Self::default()
+    }
+
+    pub fn item(text: impl Into<String>, id: i64) -> Self {
+        Self {
+            text: Some(text.into()),
+            id: Some(id),
+            ..Self::default()
+        }
+    }
+
+    pub fn checkable(text: impl Into<String>, id: i64, checked: bool) -> Self {
+        Self {
+            text: Some(text.into()),
+            id: Some(id),
+            checked: Some(checked),
+            ..Self::default()
+        }
+    }
+}
+
+/// 保留鍵註冊資訊，對應官方 `addPreservedKey`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreservedKeyState {
+    pub key_code: u32,
+    pub modifiers: u32,
+    pub guid: String,
 }
 
 /// 回應 JSON，對應官方 `TextService.currentReply` 累積出的欄位子集。
 /// 只實作 core engine 目前用得到的欄位（見 `docs/PIME_PROTOCOL.md`
 /// 「本專案 Phase 2 的取捨」）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+///
+/// `return` 依 method 不同可能是 bool（`filterKeyDown`／`onKeyDown`／
+/// `onPreservedKey`）或選單陣列（`onMenu`），故用 [`Value`] 而非固定型別。
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Reply {
     pub success: bool,
     pub seq_num: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#return: Option<bool>,
+    pub r#return: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub composition_string: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,6 +258,8 @@ pub struct Reply {
     pub add_button: Option<Vec<ButtonState>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_button: Option<Vec<ButtonState>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub add_preserved_key: Option<Vec<PreservedKeyState>>,
 }
 
 /// 序列化一則回應為 `"PIME_MSG|<client_id>|<json>\n"`（含結尾換行）。
@@ -231,7 +315,8 @@ mod tests {
 
     #[test]
     fn unknown_method_is_unsupported_not_an_error() {
-        let parsed = parse_request(r#"{"method":"onMenu","seqNum":3,"id":1}"#).unwrap();
+        let parsed =
+            parse_request(r#"{"method":"onCompartmentChanged","seqNum":3,"guid":"x"}"#).unwrap();
         assert!(matches!(parsed.request, Request::Unsupported));
     }
 
@@ -260,12 +345,13 @@ mod tests {
 
     #[test]
     fn parses_on_command() {
-        let parsed =
-            parse_request(r#"{"method":"onCommand","seqNum":1,"id":"fullwidth","type":0}"#)
-                .unwrap();
+        let parsed = parse_request(r#"{"method":"onCommand","seqNum":1,"id":2,"type":0}"#).unwrap();
         assert!(matches!(
             parsed.request,
-            Request::OnCommand { id, command_type: 0 } if id == "fullwidth"
+            Request::OnCommand {
+                command_id: 2,
+                command_type: 0
+            }
         ));
     }
 
@@ -273,6 +359,27 @@ mod tests {
     fn on_command_without_id_is_unsupported() {
         let parsed = parse_request(r#"{"method":"onCommand","seqNum":1,"type":0}"#).unwrap();
         assert!(matches!(parsed.request, Request::Unsupported));
+    }
+
+    #[test]
+    fn parses_on_menu() {
+        let parsed =
+            parse_request(r#"{"method":"onMenu","seqNum":1,"id":"zuyin-settings"}"#).unwrap();
+        assert!(matches!(
+            parsed.request,
+            Request::OnMenu { button_id } if button_id == "zuyin-settings"
+        ));
+    }
+
+    #[test]
+    fn parses_on_preserved_key_and_lowercases_guid() {
+        let parsed =
+            parse_request(r#"{"method":"onPreservedKey","seqNum":1,"guid":"{ABCD-1234}"}"#)
+                .unwrap();
+        assert!(matches!(
+            parsed.request,
+            Request::OnPreservedKey { guid } if guid == "{abcd-1234}"
+        ));
     }
 
     #[test]

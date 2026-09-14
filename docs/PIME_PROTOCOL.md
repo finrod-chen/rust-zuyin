@@ -115,31 +115,114 @@ session 卡死；失敗時回覆 `{"success": false}` 並繼續處理下一行�
 `filterKeyDown` / `onKeyDown` 等方法的回傳值（bool）會放進 `return`
 欄位，代表「這個鍵是否被輸入法吃掉」。
 
+## 按鈕 `id` 與 `commandId` 的差異
+
+研究 `addButton` 時很容易誤以為按鈕的字串 `id` 就是點擊後 `onCommand`
+收到的識別碼；實際上這是兩個獨立的欄位，對照
+[`chewing_ime.py`](https://github.com/EasyIME/PIME/blob/master/python/input_methods/chewing/chewing_ime.py)
+（新酷音輸入法的正式 PIME 後端，非本專案程式碼，僅作協定參考）：
+
+```python
+self.addButton("switch-lang",
+               icon=os.path.join(self.icon_dir, icon_name),
+               tooltip="中英文切換",
+               commandId=ID_SWITCH_LANG)   # ID_SWITCH_LANG = 1
+```
+
+`addButton(button_id, **kwargs)` 的實作是 `info["id"] = button_id`，
+`commandId` 只是塞進 `**kwargs` 的其中一個欄位；也就是說送到 client 的
+按鈕 JSON 長得像 `{"id": "switch-lang", "commandId": 1, ...}`。使用者
+點擊按鈕後，client 送回的 `onCommand` 請求 `id` 欄位帶的是 `commandId`
+（整數 `1`），**不是**按鈕自己的字串 `id`。
+
+`type: "menu"` 的按鈕（例如新酷音的 `"settings"`）則不帶 `commandId`：
+點擊後觸發的是 `onMenu`，`onMenu` 收到的 `id` 才是按鈕自己的字串 `id`。
+選單裡個別項目的 `"id"`（見下）走的又是 `onCommand` 那組整數識別空間。
+
+## `onMenu`：語言列選單
+
+`type: "menu"` 的按鈕被點擊時，client 呼叫 `onMenu(buttonId)`，`return`
+欄位帶一份選單結構（JSON 陣列）。同樣引用 `chewing_ime.py`：
+
+```python
+def onMenu(self, buttonId):
+    if buttonId == "settings" or buttonId == "windows-mode-icon":
+        return [
+            {"text": "新酷音官方網站 (&W)", "id": ID_WEBSITE},
+            {},  # 分隔線
+            {"text": "輸出簡體中文 (&S)", "id": ID_OUTPUT_SIMP_CHINESE,
+             "checked": self.outputSimpChinese},
+            {"text": "網路辭典 (&D)", "submenu": [...]},  # 子選單
+        ]
+    return None
+```
+
+項目格式：一般項目 `{"text":..,"id":..}`；分隔線是空物件 `{}`；子選單用
+`"submenu"` 帶一份巢狀陣列；可勾選項目多帶 `"checked"`。使用者選了某個
+項目後，client 送回 `onCommand`，`id` 就是該項目的 `"id"`——所以選單
+項目跟一般按鈕共用同一組 `commandId` 整數識別空間，`onCommand` 的處理
+邏輯可以直接重用。
+
+## `onPreservedKey`：全域保留鍵
+
+`onActivate` 回應可用 `addPreservedKey(keyCode, modifiers, guid)` 向
+client 註冊全域按鍵組合（不受目前組字狀態影響、也不需要送
+`filterKeyDown`／`onKeyDown` 這組流程）。`modifiers` 是 TSF 修飾鍵旗標
+（`python/textService.py` 開頭定義，見下）；`chewing_ime.py` 用這個機制
+註冊 Shift+Space 做全形／半形切換：
+
+```python
+self.addPreservedKey(VK_SPACE, TF_MOD_SHIFT, SHIFT_SPACE_GUID)
+```
+
+```
+TF_MOD_ALT      = 0x0001
+TF_MOD_CONTROL  = 0x0002
+TF_MOD_SHIFT    = 0x0004
+TF_MOD_RALT     = 0x0008
+TF_MOD_RCONTROL = 0x0010
+TF_MOD_RSHIFT   = 0x0020
+TF_MOD_LALT     = 0x0040
+TF_MOD_LCONTROL = 0x0080
+TF_MOD_LSHIFT   = 0x0100
+```
+
+按下註冊過的組合鍵時，client 送 `{"method":"onPreservedKey","guid":...}`
+（`guid` 統一轉小寫比對），`return` 是 bool，代表是否已處理。
+
 ## 本專案 Phase 2 的取捨
 
-Rust 版 `zuyin-backend` 目前實作組字／選字，以及中／英、全／半兩個語言列
-開關所需的部分：
+Rust 版 `zuyin-backend` 目前實作組字／選字、語言列（中／英、全形／半形、
+設定選單）、以及 Shift+Space 保留鍵：
 
 - 訊息框架（`<client_id>|json` in / `PIME_MSG|<client_id>|json` out）
 - `init` / `onActivate` / `onDeactivate` / `onCompositionTerminated`
 - `onKeyboardStatusChanged`（系統輸入法切換熱鍵改變中／英狀態時）
-- `onCommand`（使用者點擊語言列按鈕）
+- `onCommand`（點擊一般按鈕或選了選單項目）／`onMenu`（點擊選單按鈕）
+- `onPreservedKey`（Shift+Space 切換全形／半形）
 - `filterKeyDown` / `onKeyDown`（`filterKeyUp` / `onKeyUp` 維持官方預設的
   「一律不處理」行為，因為 core engine 目前不需要放開按鍵事件）
 - 回應欄位用到 `compositionString`、`candidateList`、`showCandidates`、
-  `commitString`、`addButton`、`changeButton`、`success`、`seqNum`、`return`
+  `commitString`、`addButton`、`changeButton`、`addPreservedKey`、
+  `success`、`seqNum`、`return`
 
 ### 語言列按鈕與全形／半形
 
-`onActivate` 回應會用 `addButton` 註冊兩個 toggle 按鈕：
+`onActivate` 回應會用 `addButton` 註冊三個按鈕：
 
-- `zuyin-chinese-english`：中／英切換，對應官方 `TextService.keyboardOpen`
-  （關閉時完全不攔截按鍵，所有輸入直接交還應用程式）；點擊後、或系統送
-  `onKeyboardStatusChanged` 通知時，回應帶 `changeButton` 更新圖示。
-- `zuyin-fullwidth`：全形／半形切換。開啟時，組字區為空、且不是任何注音
-  鍵盤按鍵（或按住 Shift，使用者要跳過注音直接打英文）的可印字元，會被
-  轉換成對應全形字元（Unicode `U+FF01`–`U+FF5E`，空白鍵特例轉成
-  `U+3000`）後直接以 `commitString` 送出。
+- `zuyin-chinese-english`（`commandId=1`，toggle）：中／英切換，對應官方
+  `TextService.keyboardOpen`（關閉時完全不攔截按鍵，所有輸入直接交還
+  應用程式）；點擊後、或系統送 `onKeyboardStatusChanged` 通知時，回應帶
+  `changeButton` 更新圖示。
+- `zuyin-fullwidth`（`commandId=2`，toggle）：全形／半形切換。開啟時，
+  組字區為空、且不是任何注音鍵盤按鍵（或按住 Shift，使用者要跳過注音
+  直接打英文）的可印字元，會被轉換成對應全形字元（Unicode
+  `U+FF01`–`U+FF5E`，空白鍵特例轉成 `U+3000`）後直接以 `commitString`
+  送出；也可用 Shift+Space 保留鍵切換，效果相同。
+- `zuyin-settings`（`type: "menu"`，無 `commandId`）：點擊觸發 `onMenu`，
+  選單提供「全形／半形輸入」（可勾選、`commandId=2`，與上面的按鈕共用
+  同一個處理邏輯）與「清除使用者選字記憶」（`commandId=3`，重置
+  `zuyin-core::Engine::forget_selections`，讓候選字排序退回純詞頻）。
 
-`onMenu`、`onPreservedKey`、`customizeUI`、`showMessage` 等其餘 UI 相關
-訊息目前不需要，留待實際串上 PIMELauncher、需要對應行為時再實作。
+`customizeUI`、`showMessage` 等其餘 UI 相關訊息目前不需要，留待實際串上
+PIMELauncher、需要對應行為時再實作。

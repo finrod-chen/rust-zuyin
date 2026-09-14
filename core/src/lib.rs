@@ -83,6 +83,11 @@ impl Engine {
         self.syllable.clear();
     }
 
+    /// 清除所有已累積的使用者選字記憶，候選字排序退回純依詞庫詞頻。
+    pub fn forget_selections(&mut self) {
+        self.ranker.clear();
+    }
+
     /// 使用者確認選字：記錄使用者記憶並清空組字狀態，回傳應送入應用程式的文字。
     pub fn select_candidate(&mut self, word: &str) -> String {
         let zhuyin = self.syllable.as_zhuyin_string();
@@ -238,6 +243,33 @@ mod tests {
         match outcome {
             KeyOutcome::Composing { candidates, .. } => {
                 assert_eq!(candidates[0].word, "號", "使用者記憶應提升「號」的排序");
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forget_selections_resets_ranking_to_base_frequency() {
+        let dict = Dictionary::parse("ㄏㄠˇ\t好\t250\nㄏㄠˇ\t號\t100\n");
+        let mut engine = Engine::new(dict);
+
+        engine.key_press('c');
+        engine.key_press('l');
+        engine.key_press('3');
+        engine.select_candidate("號");
+        engine.key_press('c');
+        engine.key_press('l');
+        engine.key_press('3');
+        engine.select_candidate("號");
+
+        engine.forget_selections();
+
+        engine.key_press('c');
+        engine.key_press('l');
+        let outcome = engine.key_press('3');
+        match outcome {
+            KeyOutcome::Composing { candidates, .. } => {
+                assert_eq!(candidates[0].word, "好", "清除記憶後應退回純詞頻排序");
             }
             other => panic!("unexpected outcome: {other:?}"),
         }

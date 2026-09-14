@@ -9,8 +9,9 @@
 mod protocol;
 mod session;
 
-use protocol::{ButtonState, ParsedRequest, Reply, Request};
-use session::{ButtonSnapshot, KeyDownOutcome, Session};
+use protocol::{ButtonState, MenuItem, ParsedRequest, PreservedKeyState, Reply, Request};
+use serde_json::json;
+use session::{ButtonKind, ButtonSnapshot, KeyDownOutcome, MenuEntry, Session};
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
@@ -104,12 +105,14 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
     match request {
         Request::OnActivate { is_keyboard_open } => {
             session.on_activate(is_keyboard_open);
-            // 每次啟用都重新註冊語言列按鈕，讓 PIMELauncher 顯示目前狀態。
+            // 每次啟用都重新註冊語言列按鈕與保留鍵，讓 PIMELauncher 顯示目前狀態。
             let buttons = session.language_bar_buttons().map(button_state).to_vec();
+            let preserved_keys = session::preserved_keys().map(preserved_key_state).to_vec();
             Reply {
                 success: true,
                 seq_num,
                 add_button: Some(buttons),
+                add_preserved_key: Some(preserved_keys),
                 ..Default::default()
             }
         }
@@ -139,7 +142,10 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
                 ..Default::default()
             }
         }
-        Request::OnCommand { id, command_type } => {
+        Request::OnCommand {
+            command_id,
+            command_type,
+        } => {
             const COMMAND_LEFT_CLICK: i64 = 0;
             if command_type != COMMAND_LEFT_CLICK {
                 return Reply {
@@ -148,18 +154,35 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
                     ..Default::default()
                 };
             }
-            match session.on_command(&id) {
-                Some(updated) => Reply {
-                    success: true,
-                    seq_num,
-                    change_button: Some(vec![button_state(updated)]),
-                    ..Default::default()
-                },
-                None => Reply {
-                    success: true,
-                    seq_num,
-                    ..Default::default()
-                },
+            let change_button = session
+                .on_command(command_id)
+                .map(|updated| vec![button_state(updated)]);
+            Reply {
+                success: true,
+                seq_num,
+                change_button,
+                ..Default::default()
+            }
+        }
+        Request::OnMenu { button_id } => {
+            let menu = session
+                .on_menu(&button_id)
+                .map(|entries| entries.into_iter().map(menu_item).collect());
+            Reply {
+                success: true,
+                seq_num,
+                r#return: menu.map(|items: Vec<MenuItem>| json!(items)),
+                ..Default::default()
+            }
+        }
+        Request::OnPreservedKey { guid } => {
+            let (handled, updated) = session.on_preserved_key(&guid);
+            Reply {
+                success: true,
+                seq_num,
+                r#return: Some(json!(handled)),
+                change_button: updated.map(|b| vec![button_state(b)]),
+                ..Default::default()
             }
         }
         Request::FilterKeyDown(event) => {
@@ -167,7 +190,7 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
             Reply {
                 success: true,
                 seq_num,
-                r#return: Some(consumed),
+                r#return: Some(json!(consumed)),
                 ..Default::default()
             }
         }
@@ -176,7 +199,7 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
         Request::FilterKeyUp | Request::OnKeyUp => Reply {
             success: true,
             seq_num,
-            r#return: Some(false),
+            r#return: Some(json!(false)),
             ..Default::default()
         },
         Request::Init | Request::Close | Request::Unsupported => Reply {
@@ -188,12 +211,40 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
 }
 
 fn button_state(snapshot: ButtonSnapshot) -> ButtonState {
+    let (r#type, command_id, toggled) = match snapshot.kind {
+        ButtonKind::Toggle {
+            command_id,
+            toggled,
+        } => ("toggle", Some(command_id), Some(toggled)),
+        ButtonKind::Menu => ("menu", None, None),
+    };
     ButtonState {
         id: snapshot.id.to_string(),
         text: snapshot.text.to_string(),
         tooltip: snapshot.tooltip.to_string(),
-        r#type: "toggle",
-        toggled: snapshot.toggled,
+        r#type,
+        command_id,
+        toggled,
+    }
+}
+
+fn menu_item(entry: MenuEntry) -> MenuItem {
+    match entry {
+        MenuEntry::Separator => MenuItem::separator(),
+        MenuEntry::Item { text, command_id } => MenuItem::item(text, command_id),
+        MenuEntry::CheckableItem {
+            text,
+            command_id,
+            checked,
+        } => MenuItem::checkable(text, command_id, checked),
+    }
+}
+
+fn preserved_key_state(snapshot: session::PreservedKeySnapshot) -> PreservedKeyState {
+    PreservedKeyState {
+        key_code: snapshot.key_code,
+        modifiers: snapshot.modifiers,
+        guid: snapshot.guid.to_string(),
     }
 }
 
@@ -202,13 +253,13 @@ fn reply_from_key_down(seq_num: u64, outcome: KeyDownOutcome) -> Reply {
         KeyDownOutcome::PassThrough => Reply {
             success: true,
             seq_num,
-            r#return: Some(false),
+            r#return: Some(json!(false)),
             ..Default::default()
         },
         KeyDownOutcome::Cleared => Reply {
             success: true,
             seq_num,
-            r#return: Some(true),
+            r#return: Some(json!(true)),
             composition_string: Some(String::new()),
             candidate_list: Some(Vec::new()),
             show_candidates: Some(false),
@@ -221,7 +272,7 @@ fn reply_from_key_down(seq_num: u64, outcome: KeyDownOutcome) -> Reply {
         } => Reply {
             success: true,
             seq_num,
-            r#return: Some(true),
+            r#return: Some(json!(true)),
             composition_string: Some(buffer),
             candidate_list: Some(candidates),
             show_candidates: Some(show_candidates),
@@ -230,7 +281,7 @@ fn reply_from_key_down(seq_num: u64, outcome: KeyDownOutcome) -> Reply {
         KeyDownOutcome::Committed(word) => Reply {
             success: true,
             seq_num,
-            r#return: Some(true),
+            r#return: Some(json!(true)),
             commit_string: Some(word),
             composition_string: Some(String::new()),
             candidate_list: Some(Vec::new()),

@@ -1,0 +1,6 @@
+/target
+
+# 使用者自訂詞庫的預設載入路徑（見 backend/src/main.rs、
+# core/src/user_phrases.rs）：內容可能是使用者自己的地址、姓名、電話等
+# 個人資料，不該進版本控制。想要範例格式請看 data/user_phrases.example.txt。
+/user_phrases.txt

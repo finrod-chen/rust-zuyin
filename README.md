@@ -99,6 +99,16 @@ docs/
   候選字視窗外觀（數字鍵選字、每列 10 個候選字）。尚未實際安裝
   PIMELauncher 驗證（需要 Windows 環境）。
 
+## 下載執行檔
+
+不想自己編譯的話，每次 push 到 `main` 分支都會自動建置最新的
+`zuyin-backend.exe`（Windows），發布在本 repo 的
+[Releases 頁面](../../releases/tag/latest)，固定叫「最新建置版」——
+不是對應某個版本號，而是永遠反映 `main` 分支最新 commit（見
+`.github/workflows/release.yml`）。下載 `zuyin-backend-windows-x64.zip`
+解壓後可直接執行 `zuyin-backend.exe`（已內附 `data/chewing-characters.txt`
+正式詞庫）。
+
 ## 開發
 
 ```bash

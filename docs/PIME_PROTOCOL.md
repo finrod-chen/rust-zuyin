@@ -288,12 +288,37 @@ Windows TSF 語言設定檔註冊、語言列顯示名稱等用途，`moduleName
 官方也附了一支對應的安裝腳本
 （`go-backend/deploy-server.ps1`）：停止 `PIMELauncher.exe` → 同步檔案到
 PIME 安裝路徑底下 → 重新啟動 `PIMELauncher.exe`，沒有額外呼叫任何 COM／
-登錄檔 API 去註冊 TSF 語言設定檔。`scripts/install-windows.ps1` 照這個
+登錄檔 API 去註冊 TSF 語言設定檔。`scripts/install-windows.ps1` 最初照這個
 流程改寫（額外加上合併 `backends.json`、找 PIME 安裝路徑等步驟），假設
-PIMELauncher 重啟時的動態掃描就足以讓新的語言設定檔生效——**這個假設沒有
-在真正的 Windows 環境驗證過**，如果重啟後 Windows 的語言清單裡還是沒有
-新輸入法，可能還缺一步 TSF 語言設定檔登錄，需要進一步研究
-`PIMETextService`／`libIME2` 的原始碼或找人在真機上實際測試。
+PIMELauncher 重啟時的動態掃描就足以讓新的語言設定檔生效。
+
+**這個假設錯了，已經實測證實**：只做上述流程（複製檔案＋合併
+`backends.json`＋重啟 `PIMELauncher.exe`）安裝後，`backends.json` 正確
+更新、`PIMELauncher.exe /console` 的除錯輸出顯示運作正常，但「Rust 注音
+輸入法」完全沒有出現在 Windows 的語言清單裡，PIMELauncher 也從來沒有收到
+過它的 `init` 請求（只有原本就裝好的新酷音會收到）。
+
+追下去發現：TSF 語言設定檔的註冊其實是 `PIMETextService.dll` 的
+`DllRegisterServer`（`PIMETextService/DllEntry.cpp`）做的，而且只在
+`regsvr32` 執行、觸發這個 DLL 的 COM 註冊進入點時才會掃描——它會走訪
+`backends.json` 裡列出的每個 backend 目錄，掃描各自的
+`input_methods\*\ime.json`，把每個檔案的 `guid` 都註冊成一個 TSF 語言
+設定檔。`PIMELauncher.exe` 只是負責轉發 stdin/stdout 協定的常駐程式，跟
+`regsvr32`／COM 註冊完全無關，重啟它不會觸發這個掃描；`installer.nsi`
+在安裝當下才會呼叫
+
+```text
+regsvr32.exe /s "<PIME 安裝路徑>\x86\PIMETextService.dll"
+regsvr32.exe /s "<PIME 安裝路徑>\x64\PIMETextService.dll"
+```
+
+（32／64 位元的 DLL 分開註冊，且要用對應位元的 `regsvr32.exe`——64 位元
+Windows 上，32 位元版反而在 `SysWOW64` 底下，不是 `System32`，這是
+Windows 由來已久的特例）。也就是說，**幫既有的 PIME 安裝新增一個
+backend，事後必須重新對已經註冊過的 `PIMETextService.dll` 執行一次
+`regsvr32`**，讓它重新掃描、把新加的 `ime.json` 也註冊進去，光靠重啟
+`PIMELauncher.exe` 不夠。`scripts/install-windows.ps1` 已經加上這一步
+（`Register-PimeTextService`），**但這個修法本身還沒有實際重新測試過**。
 
 ## 本專案 Phase 2 的取捨
 

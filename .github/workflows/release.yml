@@ -65,6 +65,7 @@ jobs:
           Copy-Item docs/THIRD_PARTY_NOTICES.md dist/
           Copy-Item pime-config dist/pime-config -Recurse
           Copy-Item scripts/install-windows.ps1 dist/scripts/
+          Copy-Item scripts/uninstall-windows.ps1 dist/scripts/
           Compress-Archive -Path dist/* -DestinationPath zuyin-backend-windows-x64.zip -Force
 
           $shortSha = "${{ github.sha }}".Substring(0, 7)

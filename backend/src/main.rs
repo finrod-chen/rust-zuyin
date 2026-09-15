@@ -39,9 +39,18 @@ const DEFAULT_USER_PHRASES_PATH: &str = "user_phrases.txt";
 /// 不受影響）；`APPDATA` 環境變數不存在時（例如本機以原始碼開發、或在
 /// 非 Windows 平台上執行測試），退回原本「執行檔所在目錄」的相對路徑。
 fn default_user_phrases_path() -> String {
-    match env::var("APPDATA") {
-        Ok(appdata) => format!("{appdata}\\rust-zuyin\\user_phrases.txt"),
-        Err(_) => DEFAULT_USER_PHRASES_PATH.to_string(),
+    default_user_phrases_path_from(env::var("APPDATA").ok())
+}
+
+/// [`default_user_phrases_path`] 的純函式版本，接受已經讀出來的 `APPDATA`
+/// 值而不是自己呼叫 `env::var`：讀寫行程共用的環境變數在平行執行的測試
+/// 之間本來就會互相競爭（同一行程內多個測試同時修改／還原同一個環境
+/// 變數，順序不保證，見這個函式的測試——曾經因為這樣在 CI 上偶發失敗），
+/// 拆成純函式後測試不用碰環境變數，就沒有這個問題。
+fn default_user_phrases_path_from(appdata: Option<String>) -> String {
+    match appdata {
+        Some(appdata) => format!("{appdata}\\rust-zuyin\\user_phrases.txt"),
+        None => DEFAULT_USER_PHRASES_PATH.to_string(),
     }
 }
 
@@ -725,18 +734,10 @@ mod tests {
         );
     }
 
-    // 這兩個測試會暫時改動行程共用的 APPDATA 環境變數；本檔案沒有其他
-    // 測試會讀寫它，執行完會還原成原本的值，避免影響同一個測試行程裡
-    // 其他（未來新增的）測試。
     #[test]
     fn default_user_phrases_path_uses_appdata_when_set() {
-        let previous = env::var("APPDATA").ok();
-        env::set_var("APPDATA", r"C:\Users\Someone\AppData\Roaming");
-        let path = default_user_phrases_path();
-        match previous {
-            Some(value) => env::set_var("APPDATA", value),
-            None => env::remove_var("APPDATA"),
-        }
+        let path =
+            default_user_phrases_path_from(Some(r"C:\Users\Someone\AppData\Roaming".to_string()));
         assert_eq!(
             path,
             r"C:\Users\Someone\AppData\Roaming\rust-zuyin\user_phrases.txt"
@@ -745,12 +746,7 @@ mod tests {
 
     #[test]
     fn default_user_phrases_path_falls_back_without_appdata() {
-        let previous = env::var("APPDATA").ok();
-        env::remove_var("APPDATA");
-        let path = default_user_phrases_path();
-        if let Some(value) = previous {
-            env::set_var("APPDATA", value);
-        }
+        let path = default_user_phrases_path_from(None);
         assert_eq!(path, DEFAULT_USER_PHRASES_PATH);
     }
 

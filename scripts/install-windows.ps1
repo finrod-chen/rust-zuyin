@@ -17,10 +17,21 @@
       4. 把 pime-config\backends.json 裡的 "rust-zuyin" 項目合併進
          <PimeRoot>\backends.json（保留其他既有 backend，不覆蓋整個檔案；
          重複執行這支腳本是安全的，會直接更新同一個項目）。
-      5. 重啟 PIMELauncher.exe，讓它重新掃描 input_methods\*\ime.json。
+      5. 對 <PimeRoot>\x86\PIMETextService.dll／x64\PIMETextService.dll
+         （存在哪個就註冊哪個）重新執行 regsvr32，讓它的 DllRegisterServer
+         重新掃描所有 backend 底下的 input_methods\*\ime.json、重新註冊
+         TSF 語言設定檔（見下方「已知結果」，這一步是必要的，只複製檔案、
+         重啟 PIMELauncher.exe 不會讓新輸入法出現在 Windows 的語言清單）。
+      6. 重啟 PIMELauncher.exe。
 
-    這支腳本沒有實際在 Windows 上跑過（開發環境沒有 Windows 機器），如果
-    跑起來哪裡不對，請照著錯誤訊息回報，不要照抄別的地方的做法硬修。
+    已知結果（第一次實測，見 GitHub PR／issue 討論）：只做步驟 1-4、6
+    （不含步驟 5 的 regsvr32 重新註冊）時，`backends.json` 有正確更新、
+    PIMELauncher.exe 的除錯主控台（`PIMELauncher.exe /console`）也顯示
+    正常運作，但「Rust 注音輸入法」完全沒有出現在 Windows 的語言清單、
+    也從來沒有收到任何 `init` 請求——這是因為 TSF 語言設定檔的註冊是在
+    `PIMETextService.dll` 的 `DllRegisterServer`（`regsvr32` 觸發）裡做的
+    一次性掃描，PIMELauncher.exe 重啟並不會觸發它。加上步驟 5 後這個問題
+    應該會解決，但**還沒有實際重新測試過**，麻煩照 README 的方式回報結果。
 
 .PARAMETER PimeRoot
     PIME 安裝路徑。預設會依序嘗試
@@ -180,6 +191,67 @@ function Start-PIMELauncher {
     Write-Host "[INFO] PIMELauncher.exe 已啟動。"
 }
 
+function Register-PimeTextService {
+    # PIME 安裝時把 PIMETextService.dll 註冊成一個 COM Text Service；它的
+    # DllRegisterServer（PIMETextService/DllEntry.cpp）會掃描每個 backend
+    # 底下的 input_methods\*\ime.json、把每個 ime.json 的 guid 都註冊成
+    # 一個 TSF 語言設定檔。這個掃描只在 regsvr32 執行時（也就是
+    # DllRegisterServer 被呼叫時）發生一次，PIMELauncher.exe 重啟並不會
+    # 重新觸發——所以裝好新的 backend 之後，要重新對已經註冊過的
+    # PIMETextService.dll 執行一次 regsvr32，讓它重新掃描、把新加的
+    # ime.json 也註冊進去，Windows 才找得到這個新輸入法。
+    #
+    # 32 位元與 64 位元的 DLL 要分別用對應位元的 regsvr32.exe 註冊
+    # （64 位元 Windows 上，32 位元版的 regsvr32.exe 在 SysWOW64 底下，
+    # 不是 System32——這兩個資料夾名稱刻意互換，是 Windows 由來已久的
+    # 特例，見微軟文件）；兩個 DLL 只要存在就都重新註冊一次，因為兩種
+    # 位元的應用程式（例如 32 位元的舊軟體 vs. 64 位元的瀏覽器）各自吃
+    # 各自位元的 TSF text service。
+    param([string]$PimeRoot)
+
+    $system32 = Join-Path $Env:WINDIR "System32\regsvr32.exe"
+    $sysWow64 = Join-Path $Env:WINDIR "SysWOW64\regsvr32.exe"
+    $x86Regsvr32 = if (Test-Path -LiteralPath $sysWow64) { $sysWow64 } else { $system32 }
+
+    $variants = @(
+        @{ Label = "64 位元"; Dll = (Join-Path $PimeRoot "x64\PIMETextService.dll"); Regsvr32 = $system32 },
+        @{ Label = "32 位元"; Dll = (Join-Path $PimeRoot "x86\PIMETextService.dll"); Regsvr32 = $x86Regsvr32 },
+        @{ Label = "ARM64"; Dll = (Join-Path $PimeRoot "arm64\PIMETextService.dll"); Regsvr32 = $system32 }
+    )
+
+    $registeredAny = $false
+    foreach ($variant in $variants) {
+        if (-not (Test-Path -LiteralPath $variant.Dll)) {
+            continue
+        }
+        Write-Host "[INFO] 重新註冊 $($variant.Label) PIMETextService.dll（讓它重新掃描 ime.json）..."
+        try {
+            if (-not (Test-Path -LiteralPath $variant.Regsvr32)) {
+                Write-Host "[WARN] 找不到 $($variant.Regsvr32)，跳過這個位元版本。"
+                continue
+            }
+            $argumentString = '/s "{0}"' -f $variant.Dll
+            $proc = Start-Process -FilePath $variant.Regsvr32 -ArgumentList $argumentString -Wait -PassThru -WindowStyle Hidden
+            if ($proc.ExitCode -eq 0) {
+                Write-Host "[INFO] 註冊完成（結束碼 0）。"
+                $registeredAny = $true
+            }
+            else {
+                Write-Host "[WARN] regsvr32 回傳結束碼 $($proc.ExitCode)，可能沒有註冊成功。"
+            }
+        }
+        catch {
+            # 這一步失敗不該讓整支安裝腳本中止——寧可 PIMELauncher 照樣
+            # 重啟、讓使用者看到清楚的警告，也不要卡在這裡拋出例外。
+            Write-Host "[WARN] 重新註冊 $($variant.Label) 版本時發生錯誤：$($_.Exception.Message)"
+        }
+    }
+
+    if (-not $registeredAny) {
+        Write-Host "[WARN] 在 $PimeRoot 底下找不到任何 PIMETextService.dll（x86／x64／arm64），跳過重新註冊這一步。"
+    }
+}
+
 function ConvertTo-JsonArrayText {
     # PowerShell 5.1（Windows 內建版本）的 ConvertTo-Json 在陣列剛好只有
     # 一個元素時，會自動「拆箱」成單一物件而不是陣列，即使輸入明明是
@@ -285,6 +357,8 @@ try {
     $newEntry = @($newEntry)[0]
     Merge-BackendEntry -BackendsJsonPath $destBackendsJson -NewEntry $newEntry
 
+    Register-PimeTextService -PimeRoot $resolvedPimeRoot
+
     Write-Host "[INFO] 安裝完成。"
 }
 finally {
@@ -295,7 +369,9 @@ Write-Host ""
 Write-Host (
     "[INFO] 接下來請打開「設定 > 時間與語言 > 語言與地區」，確認" +
     "輸入法清單裡有沒有出現「Rust 注音輸入法」；沒有的話試著登出再登入，" +
-    "或重新啟動一次電腦讓 Windows 重新偵測輸入法。這支腳本沒有在真正的" +
-    "Windows 環境驗證過，如果這一步沒有出現，請回報實際看到的狀況" +
-    "（而不是照抄其他輸入法的教學硬改設定），我們再一起排查。"
+    "或重新啟動一次電腦讓 Windows 重新偵測輸入法。第一次實測發現只複製" +
+    "檔案、重啟 PIMELauncher.exe 不會讓新輸入法出現，已經加上重新執行" +
+    "regsvr32 這一步（見這支腳本開頭的說明），但這個修法本身還沒有實際" +
+    "測過，如果這一步還是沒有出現，請照實回報看到的狀況（錯誤訊息、" +
+    "上面 regsvr32 的結束碼），我們再一起排查。"
 )

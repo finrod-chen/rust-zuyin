@@ -7,10 +7,18 @@
 ## 安裝
 
 裝好 PIME 之後，執行 [`scripts/install-windows.ps1`](../scripts/install-windows.ps1)
-即可自動把這裡的檔案複製到正確位置、更新 PIME 的 `backends.json`、並重啟
-`PIMELauncher.exe`；細節見該腳本開頭的說明註解與 `README.md`「下載執行檔」。
-以下記錄這兩個檔案各自的用途，供想手動安裝或想了解安裝腳本在做什麼的人
-參考。
+即可自動把這裡的檔案複製到正確位置、更新 PIME 的 `backends.json`、對
+`PIMETextService.dll` 重新執行 `regsvr32`、並重啟 `PIMELauncher.exe`；細節
+見該腳本開頭的說明註解與 `README.md`「下載執行檔」。以下記錄這兩個檔案
+各自的用途，供想手動安裝或想了解安裝腳本在做什麼的人參考。
+
+**重新執行 `regsvr32` 這一步是必要的**：第一次實測時只做了複製檔案、更新
+`backends.json`、重啟 `PIMELauncher.exe`，`PIMELauncher.exe /console` 的
+除錯輸出顯示一切正常，但「Rust 注音輸入法」完全沒有出現在 Windows 的
+語言清單、也從來沒收到過任何 `init` 請求。原因見下面「格式依據」——TSF
+語言設定檔的註冊是 `PIMETextService.dll` 的 `DllRegisterServer` 做的一次性
+掃描，只有 `regsvr32` 執行時才會觸發，PIMELauncher.exe 重啟不會。已經把
+這一步加進安裝腳本，但**這個修法本身還沒有實際重新測試過**。
 
 ## `backends.json`
 
@@ -74,10 +82,21 @@ GUID 是隨機產生、一次性寫死在這裡的，之後不會再變。
   `.exe` 的情況幾乎一樣，是最直接可對照的先例
 - `go-backend/input_methods/{meow,rime}/ime.json`：兩份實際存在、格式
   跟 Python 版 `ime.json` 一致的真實範例檔案
+- `PIMETextService/DllEntry.cpp` 的 `DllRegisterServer`：確認 TSF 語言
+  設定檔的註冊時機（`regsvr32` 執行時的一次性掃描），以及
+  `installer/installer.nsi` 裡官方安裝程式怎麼呼叫
+  `regsvr32.exe /s "...\PIMETextService.dll"`（32／64 位元的 DLL 分開
+  註冊，用對應位元的 `regsvr32.exe`）
 
-**這一步沒有在真正的 Windows／PIME 環境驗證過**（開發環境沒有 Windows
-機器）——上面這些格式都是照著官方原始碼與範例檔案核對過的，但沒有實際
-跑過 `PIMELauncher.exe` 確認輸入法真的會出現在 Windows 的語言清單裡。如果
-照 `install-windows.ps1` 的步驟做完、輸入法還是沒有出現，請照實回報看到
-的狀況（錯誤訊息、`PIMELauncher.exe /console` 的除錯輸出等），一起排查，
-不要照抄其他輸入法的教學自己改設定。
+另外核對過 `PIMETextService/DllEntry.cpp` 的 `DllRegisterServer`，確認了
+上面提到的「`regsvr32` 才會觸發 TSF 語言設定檔掃描」這件事，也是
+`install-windows.ps1` 現在會重新執行 `regsvr32` 的依據。
+
+**第一輪安裝腳本（只做複製檔案＋更新 `backends.json`＋重啟
+`PIMELauncher.exe`）已經實測過，確認不夠**：`backends.json` 正確更新、
+`PIMELauncher.exe /console` 顯示運作正常，但「Rust 注音輸入法」沒有出現在
+Windows 的語言清單，也沒有收到任何 `init` 請求——加上 `regsvr32` 這一步
+之後**還沒有重新測試過**。如果照更新後的 `install-windows.ps1` 跑完，
+輸入法還是沒有出現，請照實回報看到的狀況（錯誤訊息、regsvr32 的結束碼、
+`PIMELauncher.exe /console` 的除錯輸出等），一起排查，不要照抄其他輸入法
+的教學自己改設定。

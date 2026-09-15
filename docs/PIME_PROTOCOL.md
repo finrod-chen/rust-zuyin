@@ -334,7 +334,7 @@ Rust 版 `zuyin-backend` 目前實作組字／選字、語言列（中／英、�
   「一律不處理」行為，因為 core engine 目前不需要放開按鍵事件）
 - 回應欄位用到 `compositionString`、`candidateList`、`showCandidates`、
   `commitString`、`addButton`、`changeButton`、`addPreservedKey`、
-  `customizeUI`、`showMessage`、`success`、`seqNum`、`return`
+  `customizeUI`、`showMessage`、`setSelKeys`、`success`、`seqNum`、`return`
 
 ### 語言列按鈕與全形／半形
 
@@ -358,6 +358,10 @@ Rust 版 `zuyin-backend` 目前實作組字／選字、語言列（中／英、�
   `showMessage` 顯示「已清除使用者選字記憶」）。
 
 `onMenu` 之外的其餘 UI 相關訊息（`onMenu`／`onPreservedKey` 已支援；
-`removeButton`／`removePreservedKey`／`setSelKeys`／`openKeyboard`／
-`hideMessage` 目前不需要）留待實際串上 PIMELauncher、需要對應行為時再
-實作。
+`removeButton`／`removePreservedKey`／`openKeyboard`／`hideMessage` 目前
+不需要）留待實際串上 PIMELauncher、需要對應行為時再實作。
+
+`setSelKeys`（候選字選字鍵，對應數字鍵 1-9、0，見 `session.rs` 的候選字
+選字邏輯）原本評估「用不到」而沒有實作；實機測試出現候選字視窗行為
+異常後，比對真實新酷音 `onActivate` 回應一定會帶這個欄位，才發現這其實
+是必要欄位，已補上（`onActivate` 回應固定送 `"1234567890"`）。

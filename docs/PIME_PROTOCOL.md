@@ -225,6 +225,76 @@ self.customizeUI(candFontName='MingLiu',
 self.showMessage("刪除「" + target_phrase + "」成功", 2)
 ```
 
+## 安裝／註冊：`backends.json` 與 `ime.json`
+
+以上都是 backend 進程本身的線路協定；另外還有一層「PIMELauncher 怎麼知道
+要啟動哪個 backend、Windows 怎麼知道多出了一個可選的輸入法」的註冊機制，
+跟線路協定完全無關，值得另外記錄（安裝腳本見
+`scripts/install-windows.ps1`；設定檔本體見 `pime-config/`）。
+
+PIMELauncher 本身其實也是用 Rust 寫的（`PIMELauncher/src/`），核心邏輯在
+`backend_registry.rs`：
+
+1. 讀 PIME 安裝根目錄下的 `backends.json`——一個陣列，每個元素是
+   `{"name", "command", "workingDir", "params"}`，`command`／`workingDir`
+   都是相對於 PIME 安裝根目錄的路徑。這就是「有哪些 backend 引擎」的清單。
+2. 對每個 backend，掃描 `<PIME 根目錄>\<backend 名稱>\input_methods\*\`
+   底下每個子資料夾的 `ime.json`，只取其中的 `"guid"` 欄位，建立
+   「TSF 語言設定檔 GUID → backend 名稱」的對照表。
+3. 使用者切換到某個語言設定檔時，用這個對照表找到對應的 backend，照
+   `backends.json` 裡的 `command`／`workingDir`／`params` 把它當子進程
+   啟動（背後就是本文件其餘部分描述的那套 stdin/stdout 協定）。
+
+也就是說，**同一個 backend 進程可以底下掛好幾個 `input_methods\*\ime.json`
+（好幾個語言設定檔／輸入法），但每個 backend 只註冊一次執行檔／工作目錄**；
+`ime.json` 本身除了 `guid`（給上面第 2 步用）之外的欄位（`name`／
+`locale`／`fallbackLocale`／`icon`／`win8_icon`）應該是給
+Windows TSF 語言設定檔註冊、語言列顯示名稱等用途，`moduleName`／
+`serviceName` 則是 Python 版 backend 才需要（動態載入對應的 Python
+模組／類別）；這些欄位的實際消費者在別的元件（`PIMETextService`／
+`libIME2`，C++），沒有繼續往下追。
+
+本專案最直接可以照抄格式的先例，是官方已有的 **Go 版原生執行檔 backend**
+（`go-backend/`）——跟本專案一樣是編譯成單一 `.exe`、透過 stdin/stdout
+講同一套協定，不像 Python／Node.js 版需要额外的直譯器：
+
+```json
+// go-backend/README.md 引用的 backends.json 片段
+{
+  "name": "go-backend",
+  "command": "go-backend\\server.exe",
+  "workingDir": "go-backend",
+  "params": ""
+}
+```
+
+```json
+// go-backend/input_methods/meow/ime.json（實際存在的檔案，欄位留空的
+// icon／moduleName／serviceName 也照抄，代表這些欄位對原生 backend
+// 可以留空）
+{
+	"name": "喵喵輸入法 (Go版)",
+	"version": "0.1",
+	"guid": "{7A1C2E93-5B64-4F88-AE21-3D9C6B70F145}",
+	"locale": "zh-Hans-CN",
+	"fallbackLocale": "zh-CN",
+	"icon": "",
+	"win8_icon": "",
+	"moduleName": "",
+	"serviceName": ""
+}
+```
+
+官方也附了一支對應的安裝腳本
+（`go-backend/deploy-server.ps1`）：停止 `PIMELauncher.exe` → 同步檔案到
+PIME 安裝路徑底下 → 重新啟動 `PIMELauncher.exe`，沒有額外呼叫任何 COM／
+登錄檔 API 去註冊 TSF 語言設定檔。`scripts/install-windows.ps1` 照這個
+流程改寫（額外加上合併 `backends.json`、找 PIME 安裝路徑等步驟），假設
+PIMELauncher 重啟時的動態掃描就足以讓新的語言設定檔生效——**這個假設沒有
+在真正的 Windows 環境驗證過**，如果重啟後 Windows 的語言清單裡還是沒有
+新輸入法，可能還缺一步 TSF 語言設定檔登錄，需要進一步研究
+`PIMETextService`／`libIME2` 的原始碼或找人在真機上實際測試。
+
 ## 本專案 Phase 2 的取捨
 
 Rust 版 `zuyin-backend` 目前實作組字／選字、語言列（中／英、全形／半形、

@@ -152,6 +152,13 @@ impl UserPhrases {
     }
 
     fn save_to(&self, path: &Path) -> io::Result<()> {
+        // 第一次新增自訂詞時，來源路徑的資料夾可能還不存在（例如系統安裝
+        // 路徑下，每個使用者第一次使用時才會需要這個檔案；見
+        // `backend/src/main.rs` 的 `default_user_phrases_path`）。
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
         let mut codes: Vec<&String> = self.entries.keys().collect();
         codes.sort();
         let mut content = String::new();
@@ -259,6 +266,22 @@ mod tests {
         phrases.add("ㄉㄓ", "台北市大安區").unwrap();
         assert!(path.exists());
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_creates_a_missing_parent_directory() {
+        // 系統安裝路徑下，使用者專屬的自訂詞資料夾（例如 Windows 的
+        // %APPDATA%\rust-zuyin\）第一次使用前不會存在，`add` 應該要能
+        // 自己建好，而不是因為資料夾不存在就寫檔失敗。
+        let dir = temp_path("save-creates-parent-dir");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("user_phrases.txt");
+
+        let mut phrases = UserPhrases::load_file(&path).unwrap();
+        phrases.add("ㄉㄓ", "台北市大安區").unwrap();
+        assert!(path.exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

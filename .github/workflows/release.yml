@@ -1,0 +1,97 @@
+name: Build and release Windows backend
+
+# 每次 push 到 main 分支（含合併 PR）都會建置 zuyin-backend.exe，並覆蓋
+# 更新同一個 tag 為 "latest" 的 GitHub Release，讓 Release 頁面永遠反映
+# main 分支最新 commit 的建置結果；也可以在 Actions 頁面手動觸發
+# （workflow_dispatch）重新建置同一個 commit。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+# 同一時間只跑一次，避免連續兩次 push 互相搶著更新同一個 release。
+concurrency:
+  group: release-latest
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    name: Test, build, and publish latest release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # 建置 release exe 前先跑過跟本機開發一樣的品質檢查，壞掉的 commit
+      # 不該被發布成新的 latest release。
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Build release binary
+        run: cargo build --release -p zuyin-backend
+
+      # 單獨一個 exe 沒有詞庫檔案跑不起來（預設會找同目錄下的
+      # data/chewing-characters.txt），所以額外打包一份「解壓即可用」的
+      # zip——同時也帶上 pime-config/ 與安裝腳本，讓這份 zip 本身就是完整
+      # 的安裝包（見 README.md「安裝到 Windows」）；也保留單獨的 exe 檔案，
+      # 給只想自己指定詞庫路徑的人用。
+      - name: Stage release files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path dist/data | Out-Null
+          New-Item -ItemType Directory -Force -Path dist/scripts | Out-Null
+          Copy-Item target/release/zuyin-backend.exe dist/
+          Copy-Item data/chewing-characters.txt dist/data/
+          Copy-Item data/user_phrases.example.txt dist/data/
+          Copy-Item README.md dist/
+          Copy-Item docs/THIRD_PARTY_NOTICES.md dist/
+          Copy-Item pime-config dist/pime-config -Recurse
+          Copy-Item scripts/install-windows.ps1 dist/scripts/
+          Compress-Archive -Path dist/* -DestinationPath zuyin-backend-windows-x64.zip -Force
+
+          $shortSha = "${{ github.sha }}".Substring(0, 7)
+          "SHORT_SHA=$shortSha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Publish "latest" rolling release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: latest
+          target_commitish: ${{ github.sha }}
+          name: "最新建置版 (${{ env.SHORT_SHA }})"
+          body: |
+            自動從 `main` 分支最新的 commit（${{ github.sha }}）建置，屬於持續更新的
+            非正式編號版本——每次 push 到 `main` 都會覆蓋更新這個 release，不是
+            對應某個固定版本號。尚未實際安裝 PIMELauncher 驗證，見
+            [`docs/PIME_PROTOCOL.md`](${{ github.server_url }}/${{ github.repository }}/blob/main/docs/PIME_PROTOCOL.md)。
+
+            - `zuyin-backend.exe`：單獨的後端執行檔，需搭配同目錄下的
+              `data/chewing-characters.txt` 才能載入正式詞庫（見
+              [README](${{ github.server_url }}/${{ github.repository }}/blob/main/README.md) 的命令列參數說明）
+            - `zuyin-backend-windows-x64.zip`：執行檔＋詞庫＋文件，解壓後
+              直接執行 `zuyin-backend.exe` 即可
+          prerelease: true
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: |
+            target/release/zuyin-backend.exe
+            zuyin-backend-windows-x64.zip

@@ -283,6 +283,13 @@ pub struct Reply {
     pub customize_ui: Option<CustomizeUi>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_message: Option<ShowMessage>,
+    /// 候選字選字鍵，對應官方 `setSelKeys`。實測抓到的新酷音（chewing）
+    /// `onActivate` 回應一定會帶這個欄位（`"1234567890"`）；我們原本評估
+    /// 「用不到」而沒有送，但候選字視窗實際上是 `PIMETextService.dll`
+    /// 依這個欄位畫出來的選字鍵提示，沒送可能導致候選字視窗行為不正常
+    /// （見 `docs/PIME_PROTOCOL.md`「本專案 Phase 2 的取捨」）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set_sel_keys: Option<String>,
 }
 
 /// 序列化一則回應為 `"PIME_MSG|<client_id>|<json>\n"`（含結尾換行）。

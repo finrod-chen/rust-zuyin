@@ -116,7 +116,13 @@ fn layout_name(layout: KeyboardLayout) -> &'static str {
 fn run(input: impl BufRead, output: &mut impl Write, config: &Config) -> io::Result<()> {
     let mut sessions: HashMap<String, Session> = HashMap::new();
     for line in input.lines() {
-        let line = line?;
+        let line = match line {
+            Ok(line) => line,
+            Err(err) => {
+                eprintln!("ERROR: 讀取 stdin 失敗，略過這一行：{err}");
+                continue;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -193,6 +199,10 @@ fn handle_initialized(session: &mut Session, seq_num: u64, request: Request) -> 
                 add_button: Some(buttons),
                 add_preserved_key: Some(preserved_keys),
                 customize_ui: Some(customize_ui(session::candidate_ui())),
+                // 候選字視窗用數字鍵 1-9、0 選字（見 session.rs 的
+                // digit_selects_candidate 測試），與真實新酷音的
+                // setSelKeys 一致。
+                set_sel_keys: Some("1234567890".to_string()),
                 ..Default::default()
             }
         }
@@ -502,6 +512,53 @@ mod tests {
 
         // "close" 不應產生任何回應。
         assert_eq!(responses.len(), 7, "close 之外的每個請求各回應一次");
+    }
+
+    #[test]
+    fn on_activate_reply_includes_set_sel_keys() {
+        let responses = run_lines(
+            &sample_dictionary(),
+            &[
+                r#"c1|{"method":"init","seqNum":0,"id":"guid-1"}"#,
+                r#"c1|{"method":"onActivate","seqNum":1,"isKeyboardOpen":true}"#,
+            ],
+        );
+        assert!(
+            responses[1].contains(r#""setSelKeys":"1234567890""#),
+            "got: {}",
+            responses[1]
+        );
+    }
+
+    /// 一行輸入若不是合法 UTF-8，`BufRead::lines()` 會回傳 `Err`，但同一行
+    /// 的 bytes 已經被消耗掉；`run()` 不該把這個錯誤往外傳而讓整個進程
+    /// 掛掉（見 `run` 的文件註解），而是記錄後跳過，繼續處理後續行。
+    #[test]
+    fn invalid_utf8_line_is_skipped_not_fatal() {
+        let dictionary = sample_dictionary();
+        let user_phrases = UserPhrases::new();
+        let config = Config {
+            dictionary: &dictionary,
+            user_phrases: &user_phrases,
+            layout: KeyboardLayout::default(),
+        };
+        let mut input = Vec::new();
+        input.extend_from_slice(b"c1|\xff\xfe not valid utf-8\n");
+        input.extend_from_slice(br#"c1|{"method":"init","seqNum":0,"id":"guid-1"}"#);
+        input.push(b'\n');
+
+        let mut output = Vec::new();
+        run(input.as_slice(), &mut output, &config).unwrap();
+        let responses: Vec<String> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+
+        assert_eq!(
+            responses,
+            vec![r#"PIME_MSG|c1|{"success":true,"seqNum":0}"#]
+        );
     }
 
     #[test]

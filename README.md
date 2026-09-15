@@ -29,6 +29,8 @@ scripts/
   convert_chewing_dictionary.py  把 libchewing-data 轉成本專案詞庫格式
   install-windows.ps1            把 zuyin-backend 安裝進已裝好的 PIME
                                   （見下方「安裝到 Windows」）
+  uninstall-windows.ps1          完整移除已安裝的 zuyin-backend（見下方
+                                  「解除安裝」）
 data/
   dict.txt                範例詞庫（手工撰寫，供文件範例與快速測試使用）
   chewing-characters.txt  正式詞庫：轉換自 libchewing-data 的單字讀音與
@@ -137,6 +139,27 @@ PIME 安裝路徑，合併進 PIME 的 `backends.json`（不會動到其他既�
 **目前還沒有在真正的 Windows 環境驗證過**這件事，見
 [`pime-config/README.md`](pime-config/README.md) 與
 [`docs/PIME_PROTOCOL.md`](docs/PIME_PROTOCOL.md)「安裝／註冊」一節。
+
+## 解除安裝
+
+想完整移除「Rust 注音輸入法」（例如暫時放棄、或準備裝新版前先清乾淨），
+在解壓縮出來的目錄（或原始碼 repo 根目錄）下以系統管理員權限執行：
+
+```powershell
+.\scripts\uninstall-windows.ps1
+
+# 連使用者自訂詞庫（user_phrases.txt，預設在 %APPDATA%\rust-zuyin\）也一併刪掉：
+.\scripts\uninstall-windows.ps1 -RemoveUserData
+```
+
+這支腳本會停止 `PIMELauncher.exe`、解除註冊 `PIMETextService.dll` 的 TSF
+語言設定檔、從 `backends.json` 移除本專案的項目、刪除複製過去的執行檔與
+詞庫，再重新註冊 `PIMETextService.dll`（讓新酷音等其他 PIME 輸入法恢復
+正常）、重啟 `PIMELauncher.exe`。過程中其他 PIME 輸入法會短暫從 Windows
+語言清單消失一下，這是正常的中間狀態，腳本跑完就會恢復——原因見腳本
+開頭的說明註解（TSF 語言設定檔的註冊／解除註冊是整個 `PIMETextService.dll`
+共用同一個 CLSID，沒辦法只精準解除單一 backend 的設定檔）。這支腳本只會
+移除本專案安裝的部分，不會動到 PIME 本身，也不會解除安裝 PIME。
 
 ## 開發
 

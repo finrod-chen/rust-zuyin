@@ -320,6 +320,45 @@ backend，事後必須重新對已經註冊過的 `PIMETextService.dll` 執行�
 `PIMELauncher.exe` 不夠。`scripts/install-windows.ps1` 已經加上這一步
 （`Register-PimeTextService`），**但這個修法本身還沒有實際重新測試過**。
 
+### 移除：為什麼不能只刪檔案
+
+寫 `scripts/uninstall-windows.ps1` 時，同樣的問題反過來出現：能不能只刪掉
+`<PIME 安裝路徑>\rust-zuyin\` 資料夾、從 `backends.json` 移除項目就算移除
+乾淨？查了 `DllRegisterServer` 呼叫的 `g_imeModule->registerServer(...)`／
+`DllUnregisterServer` 呼叫的 `g_imeModule->unregisterServer()`，兩者的實作
+在 `PIMETextService::ImeModule` 的父類別
+[`Ime::ImeModule`](https://github.com/EasyIME/libIME2/blob/master/src/ImeModule.cpp)
+（`libIME2`，PIME 的共用 TSF 函式庫，另一個 repo）：
+
+- `registerServer()`：呼叫 `ITfInputProcessorProfiles::Register()` 註冊
+  這個 CLSID、再對傳入的每個 `LangProfileInfo`（也就是每個 backend 掃描到
+  的 `ime.json`）呼叫 `AddLanguageProfile()`——單純新增，**不會**先清掉
+  「登錄過、但這次掃描沒找到」的舊語言設定檔。
+- `unregisterServer()`：呼叫 `ITfInputProcessorProfiles::Unregister(clsid)`
+  （移除這個 CLSID 底下*所有*語言設定檔）、`ITfCategoryMgr
+  ::UnregisterCategory()`、`SHDeleteKey` 砍掉整個 CLSID 登錄機碼、並在
+  Windows 8+ 上逐一遍歷每個使用者 SID 刪除設定檔登錄——**整個
+  `PIMETextService.dll`（所有 backend 共用同一個 CLSID）一次全部解除**，
+  沒有「只解除某一個 backend 的語言設定檔」這種操作。
+
+推論出來的結果：
+
+- 只刪 `rust-zuyin` 資料夾、不重新跑 `regsvr32`：Windows 語言清單裡會留下
+  一個指向不存在檔案的殘影項目（`registerServer` 從來不會主動清除）。
+- 只 `regsvr32 /u` 解除註冊、不刪資料夾就重新 `regsvr32` 註冊回去：
+  `rust-zuyin` 的 `ime.json` 還在磁碟上，會被原封不動地重新掃描回來，
+  等於沒移除，而且中途新酷音等其他輸入法也會被一起解除又重新註冊一次。
+
+所以 `scripts/uninstall-windows.ps1` 的正確順序是「先解除整個
+`PIMETextService.dll` 的註冊 → 刪掉 `rust-zuyin` 資料夾與
+`backends.json` 項目 → 再重新註冊整個 `PIMETextService.dll`（這次掃描就
+找不到 `rust-zuyin` 了，但會照常掃到新酷音等其他 backend）」，跟安裝時
+「先複製檔案 → 再重新註冊」的順序恰好相反。過程中其他 PIME 輸入法會
+短暫從語言清單消失，這是必要的中間狀態，跟直接移除、重裝整個 PIME 的
+行為一致。**這支腳本同樣還沒有實際在真正的 Windows 環境測試過**，只驗證
+過個別函式的邏輯（JSON 合併／移除、找不到 DLL 或 `regsvr32.exe` 時是否會
+優雅降級而不中止整支腳本）。
+
 ## 本專案 Phase 2 的取捨
 
 Rust 版 `zuyin-backend` 目前實作組字／選字、語言列（中／英、全形／半形、

@@ -18,7 +18,13 @@
 語言清單、也從來沒收到過任何 `init` 請求。原因見下面「格式依據」——TSF
 語言設定檔的註冊是 `PIMETextService.dll` 的 `DllRegisterServer` 做的一次性
 掃描，只有 `regsvr32` 執行時才會觸發，PIMELauncher.exe 重啟不會。已經把
-這一步加進安裝腳本，但**這個修法本身還沒有實際重新測試過**。
+這一步加進安裝腳本。
+
+想完整移除，執行 [`scripts/uninstall-windows.ps1`](../scripts/uninstall-windows.ps1)
+（見 README.md「解除安裝」）；不要手動刪檔案了事，TSF 語言設定檔的
+註冊／解除註冊是整個 `PIMETextService.dll` 共用同一個 CLSID，只刪資料夾
+會在 Windows 語言清單留下一個指向不存在檔案的殘影項目，細節見那支腳本
+開頭的說明註解。
 
 ## `backends.json`
 
